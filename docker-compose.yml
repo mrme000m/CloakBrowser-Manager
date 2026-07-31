@@ -7,3 +7,7 @@ services:
       - ~/.cloakbrowser-manager:/data
     environment:
       - AUTH_TOKEN=${AUTH_TOKEN:-}
+      # Opt-in features (default off). See .env.example for details.
+      - MAX_RUNNING_PROFILES=${MAX_RUNNING_PROFILES:-0}
+      - PROXY_HEALTH_CHECK_INTERVAL=${PROXY_HEALTH_CHECK_INTERVAL:-0}
+      - ALLOW_LOCAL_CDP=${ALLOW_LOCAL_CDP:-false}
