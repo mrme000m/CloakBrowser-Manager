@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -15,9 +16,13 @@ from typing import Any
 from cloakbrowser import launch_persistent_context_async
 
 from . import database as db
+from . import proxy_health
 from .vnc_manager import VNCManager
 
 logger = logging.getLogger("cloakbrowser.manager.browser")
+
+# Section 3d: hard cap on concurrent running browsers (0 = unlimited).
+MAX_RUNNING_PROFILES = int(os.environ.get("MAX_RUNNING_PROFILES", "0") or 0)
 
 
 def _normalize_proxy(raw: str) -> str:
@@ -44,19 +49,58 @@ def _resolve_proxy_url(profile: dict[str, Any]) -> str | None:
 
     Priority:
       1. Explicit proxy field from the profile
-      2. proxy_credential_id → lookup credential and build URL
+      2. proxy_group_id → pick a member per the group's rotation mode
+      3. proxy_credential_id → lookup credential and build URL
     """
     raw_proxy = profile.get("proxy") or None
     if raw_proxy:
         return _normalize_proxy(raw_proxy)
 
+    group_id = profile.get("proxy_group_id")
+    if group_id:
+        url = _resolve_group_proxy(profile, group_id)
+        if url:
+            return url
+
     cred_id = profile.get("proxy_credential_id")
     if cred_id:
         cred = db.get_proxy_credential(cred_id)
         if cred:
-            return db.build_proxy_url_from_credential(cred)
+            return proxy_health.build_proxy_url(cred)
 
     return None
+
+
+def _resolve_group_proxy(profile: dict[str, Any], group_id: str) -> str | None:
+    """Pick a member credential of a proxy group per its rotation mode and build its URL."""
+    group = db.get_proxy_group(group_id)
+    if not group:
+        return None
+    member_ids = db.list_group_member_ids(group_id)
+    if not member_ids:
+        return None
+    mode = group.get("rotation_mode", "round_robin")
+    chosen_id: str | None = None
+    if mode == "round_robin":
+        idx, _n = db.next_round_robin_index(group_id)
+        if idx < 0:
+            return None
+        chosen_id = member_ids[idx]
+    elif mode == "random":
+        import random
+        chosen_id = random.choice(member_ids)
+    else:  # sticky_session
+        assigned = profile.get("proxy_assignment")
+        if assigned and assigned in member_ids:
+            chosen_id = assigned
+        else:
+            pos = int(hashlib.md5(profile["id"].encode()).hexdigest(), 16) % len(member_ids)
+            chosen_id = member_ids[pos]
+            db.update_profile(profile["id"], proxy_assignment=chosen_id)
+    cred = db.get_proxy_credential(chosen_id)
+    if not cred:
+        return None
+    return proxy_health.build_proxy_url(cred)
 
 
 def _validate_proxy(url: str) -> None:
@@ -174,6 +218,10 @@ class RunningProfile:
     display: int
     ws_port: int
     cdp_port: int
+    # GeoIP resolved from the (proxied) browser after launch (best-effort)
+    exit_ip: str | None = None
+    effective_timezone: str | None = None
+    effective_locale: str | None = None
 
 
 class BrowserManager:
@@ -184,15 +232,29 @@ class BrowserManager:
         self._lock = asyncio.Lock()
         self._next_cdp_port = BASE_CDP_PORT
         self._auto_launch_task: asyncio.Task | None = None
+        self._health_task: asyncio.Task | None = None
+        # Crash auto-restart bookkeeping (Section 3c)
+        self._restart_tasks: dict[str, asyncio.Task] = {}
+        self._restart_counts: dict[str, int] = {}
 
-    async def launch(self, profile: dict[str, Any]) -> RunningProfile:
+    async def launch(self, profile: dict[str, Any], is_restart: bool = False) -> RunningProfile:
         """Launch a browser instance for the given profile."""
         profile_id = profile["id"]
 
         async with self._lock:
             if profile_id in self.running or profile_id in self._launching:
                 raise RuntimeError(f"Profile {profile_id} is already running")
+            if MAX_RUNNING_PROFILES > 0 and len(self.running) + len(self._launching) >= MAX_RUNNING_PROFILES:
+                raise ValueError(f"Max running profiles ({MAX_RUNNING_PROFILES}) reached")
             self._launching.add(profile_id)
+
+        # Manual (non-restart) launch resets the crash-restart counter and
+        # cancels any pending auto-restart for this profile.
+        if not is_restart:
+            self._restart_counts.pop(profile_id, None)
+            task = self._restart_tasks.pop(profile_id, None)
+            if task and not task.done():
+                task.cancel()
 
         display, ws_port = await self.vnc.allocate()
 
@@ -298,6 +360,9 @@ class BrowserManager:
                 profile_id, display, ws_port, cdp_port,
             )
 
+            # Best-effort GeoIP detection from the (proxied) browser — non-blocking.
+            asyncio.create_task(self._detect_geoip(profile_id, running))
+
             return running
 
         except BaseException:
@@ -307,7 +372,12 @@ class BrowserManager:
             raise
 
     async def _on_browser_closed(self, profile_id: str):
-        """Called when browser exits (crash, user closed via VNC, or stop())."""
+        """Called when browser exits (crash, user closed via VNC).
+
+        Not triggered by stop() — stop() pops `running` first, so this finds
+        nothing and returns early. That's what lets an explicit stop avoid
+        auto-restart while an unexpected close triggers it (Section 3c).
+        """
         async with self._lock:
             running = self.running.pop(profile_id, None)
 
@@ -315,11 +385,19 @@ class BrowserManager:
             logger.info("Browser closed for profile %s, cleaning up", profile_id)
             await self.vnc.stop_vnc(running.display)
 
+        await self._maybe_schedule_restart(profile_id)
+
     async def stop(self, profile_id: str):
-        """Stop a running browser instance."""
+        """Stop a running browser instance and cancel any pending auto-restart."""
         # Pop before close so _on_browser_closed() finds nothing to clean up
         async with self._lock:
             running = self.running.pop(profile_id, None)
+
+        # Cancel any pending crash auto-restart for this profile
+        self._restart_counts.pop(profile_id, None)
+        task = self._restart_tasks.pop(profile_id, None)
+        if task and not task.done():
+            task.cancel()
 
         if not running:
             return
@@ -342,8 +420,91 @@ class BrowserManager:
                 "vnc_ws_port": running.ws_port,
                 "display": f":{running.display}",
                 "cdp_url": f"/api/profiles/{profile_id}/cdp",
+                "exit_ip": running.exit_ip,
+                "effective_timezone": running.effective_timezone,
+                "effective_locale": running.effective_locale,
             }
-        return {"status": "stopped", "vnc_ws_port": None, "display": None, "cdp_url": None}
+        return {
+            "status": "stopped",
+            "vnc_ws_port": None,
+            "display": None,
+            "cdp_url": None,
+            "exit_ip": None,
+            "effective_timezone": None,
+            "effective_locale": None,
+        }
+
+    async def _maybe_schedule_restart(self, profile_id: str) -> None:
+        """Schedule an auto-restart for a crashed profile (Section 3c)."""
+        profile = db.get_profile(profile_id)
+        if not profile or not profile.get("restart_on_crash"):
+            return
+        if profile_id in self.running or profile_id in self._launching:
+            return  # already running/launching again
+        max_restarts = int(profile.get("max_restarts", 5) or 0)
+        count = self._restart_counts.get(profile_id, 0)
+        if max_restarts <= 0 or count >= max_restarts:
+            logger.warning(
+                "Not auto-restarting %s: max_restarts reached (%d/%d)",
+                profile_id, count, max_restarts,
+            )
+            self._restart_counts.pop(profile_id, None)
+            return
+        backoff = min(2 ** count, 60)
+        self._restart_counts[profile_id] = count + 1
+        logger.info(
+            "Scheduling auto-restart for %s in %ds (attempt %d/%d)",
+            profile_id, backoff, count + 1, max_restarts,
+        )
+        task = asyncio.create_task(self._restart_after(profile_id, backoff))
+        self._restart_tasks[profile_id] = task
+
+    async def _restart_after(self, profile_id: str, delay: int) -> None:
+        try:
+            await asyncio.sleep(delay)
+            profile = db.get_profile(profile_id)
+            if not profile:
+                return
+            if profile_id in self.running or profile_id in self._launching:
+                return
+            if profile.get("is_template"):
+                return
+            logger.info("Auto-restarting profile %s", profile_id)
+            await self.launch(profile, is_restart=True)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.error("Auto-restart failed for %s: %s", profile_id, exc)
+        finally:
+            self._restart_tasks.pop(profile_id, None)
+
+    async def _detect_geoip(self, profile_id: str, running: RunningProfile) -> None:
+        """Best-effort: read exit IP / timezone / locale from the proxied browser."""
+        try:
+            pages = running.context.pages
+            page = pages[0] if pages else None
+            if page is None:
+                return
+            try:
+                ip = await page.evaluate(
+                    "await fetch('https://api.ipify.org?format=json')"
+                    ".then(r=>r.json()).then(d=>d.ip).catch(()=>null)"
+                )
+                running.exit_ip = ip
+            except Exception as exc:
+                logger.debug("geoip exit ip failed for %s: %s", profile_id, exc)
+            try:
+                tz = await page.evaluate("Intl.DateTimeFormat().resolvedOptions().timeZone")
+                running.effective_timezone = tz
+            except Exception as exc:
+                logger.debug("geoip tz failed for %s: %s", profile_id, exc)
+            try:
+                loc = await page.evaluate("navigator.language")
+                running.effective_locale = loc
+            except Exception as exc:
+                logger.debug("geoip locale failed for %s: %s", profile_id, exc)
+        except Exception as exc:
+            logger.debug("geoip detection failed for %s: %s", profile_id, exc)
 
     async def cleanup_all(self):
         """Stop all running profiles. Called on shutdown."""

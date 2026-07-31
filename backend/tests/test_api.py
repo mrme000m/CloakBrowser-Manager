@@ -149,21 +149,23 @@ def test_launch_already_running(app_client: TestClient):
     main.browser_mgr.running.pop(pid, None)
 
 
-def test_launch_invalid_proxy_400(app_client: TestClient):
+def test_launch_invalid_proxy_400(app_client: TestClient, monkeypatch):
     """ValueError from browser_mgr.launch should map to 400."""
     create = app_client.post("/api/profiles", json={"name": "BadProxy"})
     pid = create.json()["id"]
-    main.browser_mgr.launch = AsyncMock(side_effect=ValueError("Invalid proxy scheme 'ftp'"))
+    monkeypatch.setattr(main.browser_mgr, "launch",
+                        AsyncMock(side_effect=ValueError("Invalid proxy scheme 'ftp'")))
     resp = app_client.post(f"/api/profiles/{pid}/launch")
     assert resp.status_code == 400
     assert "ftp" in resp.json()["detail"]
 
 
-def test_launch_failure_500(app_client: TestClient):
+def test_launch_failure_500(app_client: TestClient, monkeypatch):
     """Generic exception from browser_mgr.launch should map to 500."""
     create = app_client.post("/api/profiles", json={"name": "Crash"})
     pid = create.json()["id"]
-    main.browser_mgr.launch = AsyncMock(side_effect=RuntimeError("Xvnc failed"))
+    monkeypatch.setattr(main.browser_mgr, "launch",
+                        AsyncMock(side_effect=RuntimeError("Xvnc failed")))
     resp = app_client.post(f"/api/profiles/{pid}/launch")
     assert resp.status_code == 500
     assert resp.json()["detail"] == "Failed to launch browser"

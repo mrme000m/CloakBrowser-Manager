@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import shutil
+import socket
 import subprocess
 from dataclasses import dataclass, field
 
@@ -21,20 +23,48 @@ class VNCInstance:
 class VNCManager:
     BASE_DISPLAY = 100
     BASE_WS_PORT = 6100
+    # Cap on concurrent displays (matches CDP's 100-port range; bounded by
+    # MAX_RUNNING_PROFILES in practice). Configurable via env.
+    MAX_DISPLAYS = int(os.environ.get("VNC_MAX_DISPLAYS", "100") or 100)
+    _MAX_WS_SCAN = 200  # attempts to find a free ws_port at/after the base
 
     def __init__(self):
         self._allocated: dict[int, VNCInstance] = {}
         self._lock = asyncio.Lock()
 
     async def allocate(self) -> tuple[int, int]:
-        """Returns (display_number, ws_port) for a new profile."""
+        """Returns (display_number, ws_port) for a new profile.
+
+        Picks the lowest free display in [BASE_DISPLAY, BASE_DISPLAY+MAX_DISPLAYS)
+        and bind-checks the corresponding ws_port (scanning forward if taken)
+        so a non-free port no longer silently collides (Section 3e).
+        """
         async with self._lock:
             display = self.BASE_DISPLAY
             while display in self._allocated:
                 display += 1
-            ws_port = self.BASE_WS_PORT + (display - self.BASE_DISPLAY)
+            if display >= self.BASE_DISPLAY + self.MAX_DISPLAYS:
+                raise RuntimeError(
+                    f"No free VNC display in range "
+                    f"{self.BASE_DISPLAY}-{self.BASE_DISPLAY + self.MAX_DISPLAYS - 1}"
+                )
+            base_ws = self.BASE_WS_PORT + (display - self.BASE_DISPLAY)
+            ws_port = self._find_free_ws_port(base_ws)
             self._allocated[display] = VNCInstance(display=display, ws_port=ws_port)
             return display, ws_port
+
+    @staticmethod
+    def _find_free_ws_port(start: int) -> int:
+        """Return a free TCP port at or after `start` (bind-checked on 127.0.0.1)."""
+        for port in range(start, start + VNCManager._MAX_WS_SCAN):
+            with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
+                s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+                try:
+                    s.bind(("127.0.0.1", port))
+                    return port
+                except OSError:
+                    continue
+        raise RuntimeError(f"No free WebSocket port found at or after {start}")
 
     async def start_vnc(
         self,

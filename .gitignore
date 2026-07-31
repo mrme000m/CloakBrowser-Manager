@@ -24,3 +24,8 @@ CLAUDE.md
 publish-docker.sh
 .beads
 debug
+
+# Local test venv
+.venv-test/
+# TypeScript incremental build cache
+*.tsbuildinfo

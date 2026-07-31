@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { api, type ProxyCredential, type ProxyCredentialData } from "../lib/api";
+import { api, type ProxyCredential, type ProxyCredentialData, type ProxyTestResult } from "../lib/api";
 
 export function useProxyCredentials() {
   const [credentials, setCredentials] = useState<ProxyCredential[]>([]);
@@ -51,5 +51,38 @@ export function useProxyCredentials() {
     }
   }, []);
 
-  return { credentials, loading, error, refresh, create, update, remove };
+  /** Test one credential through its proxy; updates that row in-place. */
+  const test = useCallback(async (id: string): Promise<ProxyTestResult | undefined> => {
+    try {
+      const result = await api.testProxyCredential(id);
+      setCredentials((prev) =>
+        prev.map((c) =>
+          c.id === id
+            ? {
+                ...c,
+                last_status: result.ok ? "ok" : "failed",
+                last_exit_ip: result.exit_ip,
+                last_country: result.country,
+                last_checked_at: new Date().toISOString(),
+              }
+            : c,
+        ),
+      );
+      return result;
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Proxy test failed");
+    }
+  }, []);
+
+  /** Test every credential; refreshes all rows. */
+  const testAll = useCallback(async () => {
+    try {
+      await api.testAllProxyCredentials();
+      await refresh();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Bulk proxy test failed");
+    }
+  }, [refresh]);
+
+  return { credentials, loading, error, refresh, create, update, remove, test, testAll };
 }

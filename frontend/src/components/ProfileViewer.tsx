@@ -7,13 +7,14 @@ interface ProfileViewerProps {
   cdpUrl: string | null;
   cdpEndpoint?: string | null;
   clipboardSync: boolean;
+  authRequired?: boolean;
   onDisconnect: () => void;
 }
 
 // X11 keysym for V key (Ctrl is already held in VNC by the time we intercept)
 const XK_v = 0x0076;
 
-export function ProfileViewer({ profileId, cdpUrl, cdpEndpoint, clipboardSync: initialClipboardSync, onDisconnect }: ProfileViewerProps) {
+export function ProfileViewer({ profileId, cdpUrl, cdpEndpoint, clipboardSync: initialClipboardSync, authRequired, onDisconnect }: ProfileViewerProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const rfbRef = useRef<any>(null);
   const [connected, setConnected] = useState(false);
@@ -22,9 +23,16 @@ export function ProfileViewer({ profileId, cdpUrl, cdpEndpoint, clipboardSync: i
   const [clipboardSync, setClipboardSync] = useState(initialClipboardSync);
   const [cdpCopied, setCdpCopied] = useState(false);
   const [cdpDropdown, setCdpDropdown] = useState(false);
+  // Runtime status: geoip + active CDP client count (polled while connected)
+  const [geoip, setGeoip] = useState<{ exit_ip: string | null; tz: string | null; locale: string | null }>({ exit_ip: null, tz: null, locale: null });
+  const [cdpClients, setCdpClients] = useState(0);
 
   // Resolve CDP endpoint
   const cdpWsUrl = cdpEndpoint || (cdpUrl ? `${window.location.protocol === "https:" ? "wss:" : "ws:"}//${window.location.host}${cdpUrl}` : null);
+  // HTTP equivalent of the WS endpoint (for /json/list curl + Playwright/Puppeteer connect snippets)
+  const cdpHttpUrl = cdpWsUrl
+    ? cdpWsUrl.replace(/^wss:\/\//, "https://").replace(/^ws:\/\//, "http://")
+    : null;
 
   useEffect(() => {
     let rfb: any = null;
@@ -84,6 +92,30 @@ export function ProfileViewer({ profileId, cdpUrl, cdpEndpoint, clipboardSync: i
       rfbRef.current = null;
     };
   }, [profileId, onDisconnect]);
+
+  // Poll per-profile status (exit IP / TZ / locale + active CDP clients) while running.
+  useEffect(() => {
+    if (!connected) {
+      setGeoip({ exit_ip: null, tz: null, locale: null });
+      setCdpClients(0);
+      return;
+    }
+    let cancelled = false;
+    const poll = async () => {
+      try {
+        const s = await api.getProfileStatus(profileId);
+        if (!cancelled) {
+          setGeoip({ exit_ip: s.exit_ip, tz: s.effective_timezone, locale: s.effective_locale });
+          setCdpClients(s.cdp_clients ?? 0);
+        }
+      } catch {
+        // non-fatal; status is best-effort
+      }
+    };
+    poll();
+    const interval = setInterval(poll, 5000);
+    return () => { cancelled = true; clearInterval(interval); };
+  }, [profileId, connected]);
 
   // Host→VNC: intercept Ctrl+V/Cmd+V at keydown (capture phase)
   useEffect(() => {
@@ -205,6 +237,20 @@ export function ProfileViewer({ profileId, cdpUrl, cdpEndpoint, clipboardSync: i
     });
   };
 
+  // Authorization header snippet — rendered only when the manager has auth enabled.
+  // The token lives in an httponic cookie the browser can't read, so it's a placeholder.
+  const headersArg = authRequired ? `, headers: {"Authorization": "Bearer <YOUR_TOKEN>"}` : "";
+  const curlHeader = authRequired ? ` -H "Authorization: Bearer <YOUR_TOKEN>"` : "";
+  const playwrightPython = `from playwright.async_api import async_playwright
+async with async_playwright() as p:
+    browser = await p.chromium.connect_over_cdp("${cdpWsUrl}"${headersArg})`;
+  const playwrightJs = `const { chromium } = require("playwright");
+const browser = await chromium.connectOverCDP("${cdpWsUrl}"${headersArg ? `{${headersArg.slice(2)}}` : ""});`;
+  const puppeteer = `const browser = await puppeteer.connect({
+  browserWSEndpoint: "${cdpWsUrl}"${headersArg ? `,${headersArg.slice(1)}` : ""},
+});`;
+  const curlJson = `curl${curlHeader} ${cdpHttpUrl}/json/list`;
+
   if (error) {
     return (
       <div className="flex items-center justify-center h-full">
@@ -225,6 +271,17 @@ export function ProfileViewer({ profileId, cdpUrl, cdpEndpoint, clipboardSync: i
           <span className="text-xs text-gray-400">
             {connected ? "Connected" : "Connecting..."}
           </span>
+          {connected && cdpClients > 0 && (
+            <span className="text-xs text-accent flex items-center gap-1" title="Active CDP (DevTools) client sessions">
+              <Code2 className="h-3 w-3" />
+              {cdpClients} CDP{cdpClients === 1 ? "" : "s"}
+            </span>
+          )}
+          {connected && (geoip.exit_ip || geoip.tz) && (
+            <span className="text-xs text-gray-500 font-mono truncate max-w-[40vw]" title="Exit IP · timezone · locale (GeoIP)">
+              {geoip.exit_ip ?? "—"} · {geoip.tz ?? "—"} · {geoip.locale ?? "—"}
+            </span>
+          )}
         </div>
         <div className="flex items-center gap-1">
           {/* CDP dropdown */}
@@ -265,6 +322,40 @@ export function ProfileViewer({ profileId, cdpUrl, cdpEndpoint, clipboardSync: i
                         {cdpCopied ? <Check className="h-3 w-3 text-emerald-400" /> : <Copy className="h-3 w-3" />}
                       </button>
                     </div>
+                  </div>
+
+                  {/* Connect snippets */}
+                  <div className="mb-3">
+                    <label className="text-[10px] font-medium text-gray-500 uppercase mb-1 block">
+                      Connect
+                    </label>
+                    {([
+                      { label: "Playwright (Python)", code: playwrightPython },
+                      { label: "Playwright (JS)", code: playwrightJs },
+                      { label: "Puppeteer", code: puppeteer },
+                      { label: "curl /json/list", code: curlJson },
+                    ] as const).map((s) => (
+                      <div key={s.label} className="mb-1.5">
+                        <div className="text-[9px] text-gray-500 mb-0.5">{s.label}</div>
+                        <div className="flex items-start gap-1">
+                          <pre className="flex-1 text-[10px] text-gray-400 font-mono bg-surface-2 rounded px-2 py-1 break-all max-h-14 overflow-y-auto whitespace-pre-wrap">
+{s.code}
+                          </pre>
+                          <button
+                            onClick={() => copyText(s.code)}
+                            className="p-1 text-gray-500 hover:text-gray-300 flex-shrink-0"
+                            title={cdpCopied ? "Copied!" : `Copy ${s.label}`}
+                          >
+                            {cdpCopied ? <Check className="h-3 w-3 text-emerald-400" /> : <Copy className="h-3 w-3" />}
+                          </button>
+                        </div>
+                      </div>
+                    ))}
+                    {authRequired && (
+                      <p className="text-[9px] text-gray-600 mt-1">
+                        Replace <code className="text-accent">&lt;YOUR_TOKEN&gt;</code> with your auth token (required over the tunnel).
+                      </p>
+                    )}
                   </div>
 
                   {/* chrome-devtools-mcp command */}

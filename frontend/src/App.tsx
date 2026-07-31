@@ -1,7 +1,8 @@
 import { useState, useCallback, useEffect } from "react";
-import { Lock, PanelLeftClose, PanelLeft, Shield } from "lucide-react";
+import { Lock, PanelLeftClose, PanelLeft, Shield, Server, Shuffle } from "lucide-react";
 import { useProfiles } from "./hooks/useProfiles";
 import { useProxyCredentials } from "./hooks/useProxyCredentials";
+import { useProxyGroups } from "./hooks/useProxyGroups";
 import { api, setOnUnauthorized, type ProfileCreateData } from "./lib/api";
 import { ProfileList } from "./components/ProfileList";
 import { ProfileForm } from "./components/ProfileForm";
@@ -10,6 +11,8 @@ import { LaunchButton } from "./components/LaunchButton";
 import { StatusIndicator } from "./components/StatusIndicator";
 import { LoginPage } from "./components/LoginPage";
 import { ProxyCredentialsManager } from "./components/ProxyCredentialsManager";
+import { ProxyProvidersManager } from "./components/ProxyProvidersManager";
+import { ProxyGroupsManager } from "./components/ProxyGroupsManager";
 
 type AuthState = "checking" | "required" | "ok" | "error";
 type View = "empty" | "create" | "edit" | "view";
@@ -91,14 +94,27 @@ interface AppContentProps {
 }
 
 function AppContent({ authRequired, onLogout }: AppContentProps) {
-  const { profiles, loading, error, create, update, remove, launch, stop } = useProfiles();
+  const { profiles, loading, error, create, update, remove, launch, stop, clone, bulkLaunch, bulkStop, bulkDelete } = useProfiles();
   const { credentials: proxyCredentials } = useProxyCredentials();
+  const { groups: proxyGroups } = useProxyGroups();
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [view, setView] = useState<View>("empty");
   const [sidebarOpen, setSidebarOpen] = useState(true);
   const [proxyManagerOpen, setProxyManagerOpen] = useState(false);
+  const [proxyProviderManagerOpen, setProxyProviderManagerOpen] = useState(false);
+  const [proxyGroupManagerOpen, setProxyGroupManagerOpen] = useState(false);
+  const [maxRunning, setMaxRunning] = useState<number | null>(null);
 
   const selected = profiles.find((p) => p.id === selectedId) ?? null;
+
+  // Poll system status for the running-cap (MAX_RUNNING_PROFILES), if configured.
+  useEffect(() => {
+    let active = true;
+    const poll = () => api.getStatus().then((s) => { if (active) setMaxRunning(s.max_running ?? null); }).catch(() => {});
+    poll();
+    const interval = setInterval(poll, 5000);
+    return () => { active = false; clearInterval(interval); };
+  }, []);
 
   const handleSelect = useCallback((id: string) => {
     setSelectedId(id);
@@ -143,6 +159,31 @@ function AppContent({ authRequired, onLogout }: AppContentProps) {
     setView("edit");
   }, [selectedId, stop]);
 
+  const handleDuplicate = useCallback(async (id: string) => {
+    const profile = await clone(id);
+    if (profile) {
+      setSelectedId(profile.id);
+      setView("edit");
+    }
+  }, [clone]);
+
+  const handleBulkLaunch = useCallback(async (ids: string[]) => {
+    await bulkLaunch({ ids });
+  }, [bulkLaunch]);
+
+  const handleBulkStop = useCallback(async (ids: string[]) => {
+    await bulkStop({ ids });
+  }, [bulkStop]);
+
+  const handleBulkDelete = useCallback(async (ids: string[]) => {
+    await bulkDelete({ ids });
+    // Clear selection if the deleted set included the selected profile.
+    if (selectedId && ids.includes(selectedId)) {
+      setSelectedId(null);
+      setView("empty");
+    }
+  }, [bulkDelete, selectedId]);
+
   const handleVncDisconnect = useCallback(() => {
     setView("edit");
   }, []);
@@ -165,9 +206,14 @@ function AppContent({ authRequired, onLogout }: AppContentProps) {
             selectedId={selectedId}
             onSelect={handleSelect}
             onNew={handleNew}
+            onDuplicate={handleDuplicate}
+            onBulkLaunch={handleBulkLaunch}
+            onBulkStop={handleBulkStop}
+            onBulkDelete={handleBulkDelete}
+            maxRunning={maxRunning}
           />
-          {/* Proxy credentials button */}
-          <div className="p-3 border-t border-border">
+          {/* Proxy management buttons */}
+          <div className="p-3 border-t border-border space-y-2">
             <button
               onClick={() => setProxyManagerOpen(true)}
               className="btn-secondary w-full flex items-center justify-center gap-1.5 text-xs"
@@ -176,6 +222,24 @@ function AppContent({ authRequired, onLogout }: AppContentProps) {
               <Shield className="h-3 w-3" />
               <span>Proxy Credentials</span>
             </button>
+            <div className="flex gap-2">
+              <button
+                onClick={() => setProxyProviderManagerOpen(true)}
+                className="btn-secondary flex-1 flex items-center justify-center gap-1.5 text-xs"
+                title="Manage proxy providers (IPVanish, ...)"
+              >
+                <Server className="h-3 w-3" />
+                <span>Providers</span>
+              </button>
+              <button
+                onClick={() => setProxyGroupManagerOpen(true)}
+                className="btn-secondary flex-1 flex items-center justify-center gap-1.5 text-xs"
+                title="Manage proxy rotation groups"
+              >
+                <Shuffle className="h-3 w-3" />
+                <span>Groups</span>
+              </button>
+            </div>
           </div>
         </div>
       )}
@@ -201,6 +265,11 @@ function AppContent({ authRequired, onLogout }: AppContentProps) {
             )}
           </div>
           <div className="flex items-center gap-2">
+            {maxRunning !== null && (
+              <span className="text-xs text-gray-500" title="Running profiles / max allowed">
+                {profiles.filter((p) => p.status === "running").length}/{maxRunning}
+              </span>
+            )}
             {selected && (
               <LaunchButton
                 status={selected.status}
@@ -241,6 +310,7 @@ function AppContent({ authRequired, onLogout }: AppContentProps) {
             <ProfileForm
               profile={null}
               proxyCredentials={proxyCredentials}
+              proxyGroups={proxyGroups}
               onSave={handleCreate}
               onCancel={() => setView("empty")}
             />
@@ -250,6 +320,7 @@ function AppContent({ authRequired, onLogout }: AppContentProps) {
             <ProfileForm
               profile={selected}
               proxyCredentials={proxyCredentials}
+              proxyGroups={proxyGroups}
               onSave={handleUpdate}
               onDelete={handleDelete}
               onCancel={() => {
@@ -266,6 +337,7 @@ function AppContent({ authRequired, onLogout }: AppContentProps) {
               cdpUrl={selected.cdp_url}
               cdpEndpoint={selected.cdp_endpoint}
               clipboardSync={selected.clipboard_sync}
+              authRequired={authRequired}
               onDisconnect={handleVncDisconnect}
             />
           )}
@@ -276,6 +348,18 @@ function AppContent({ authRequired, onLogout }: AppContentProps) {
       <ProxyCredentialsManager
         open={proxyManagerOpen}
         onClose={() => setProxyManagerOpen(false)}
+      />
+
+      {/* Proxy Providers Manager Modal */}
+      <ProxyProvidersManager
+        open={proxyProviderManagerOpen}
+        onClose={() => setProxyProviderManagerOpen(false)}
+      />
+
+      {/* Proxy Groups Manager Modal */}
+      <ProxyGroupsManager
+        open={proxyGroupManagerOpen}
+        onClose={() => setProxyGroupManagerOpen(false)}
       />
     </div>
   );

@@ -96,7 +96,15 @@ def test_get_status_stopped():
     from backend.browser_manager import BrowserManager
     mgr = BrowserManager()
     status = mgr.get_status("nonexistent")
-    assert status == {"status": "stopped", "vnc_ws_port": None, "display": None, "cdp_url": None}
+    assert status == {
+        "status": "stopped",
+        "vnc_ws_port": None,
+        "display": None,
+        "cdp_url": None,
+        "exit_ip": None,
+        "effective_timezone": None,
+        "effective_locale": None,
+    }
 
 
 def test_get_status_running():
@@ -116,4 +124,7 @@ def test_get_status_running():
         "vnc_ws_port": 6100,
         "display": ":100",
         "cdp_url": "/api/profiles/abc/cdp",
+        "exit_ip": None,
+        "effective_timezone": None,
+        "effective_locale": None,
     }

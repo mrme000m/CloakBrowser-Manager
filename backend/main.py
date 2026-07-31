@@ -25,9 +25,15 @@ import starlette.requests
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from . import database as db
+from . import proxy_health
 from .browser_manager import BrowserManager
 from .models import (
+    BulkIdsRequest,
+    BulkResultItem,
+    BulkResultResponse,
     ClipboardRequest,
+    CloneRequest,
+    GroupMembersUpdate,
     LaunchResponse,
     LoginRequest,
     ProfileCreate,
@@ -37,6 +43,14 @@ from .models import (
     ProxyCredentialCreate,
     ProxyCredentialResponse,
     ProxyCredentialUpdate,
+    ProxyGroupCreate,
+    ProxyGroupMemberResponse,
+    ProxyGroupResponse,
+    ProxyGroupUpdate,
+    ProxyProviderCreate,
+    ProxyProviderResponse,
+    ProxyProviderUpdate,
+    ProxyTestResult,
     StatusResponse,
     TagResponse,
 )
@@ -52,6 +66,57 @@ logging.getLogger("asyncio").setLevel(logging.WARNING)
 # If not set, all routes are open (local dev). If set, all /api/* routes
 # (except /api/auth/* and /api/status) require Bearer token or cookie.
 AUTH_TOKEN: str | None = os.environ.get("AUTH_TOKEN") or None
+
+# Section 4c: allow an unauthenticated, localhost-only page-level CDP path so
+# local tools (e.g. bdg) can connect without an auth-injecting bridge. Only
+# requests from loopback (client IP or Host header) are exempt, so it stays
+# safe behind a CF tunnel (the tunnel's Host is the public hostname).
+ALLOW_LOCAL_CDP: bool = os.environ.get("ALLOW_LOCAL_CDP", "").lower() in ("1", "true", "yes", "on")
+
+# Section 3d: hard cap on concurrent running browsers (0 = unlimited).
+MAX_RUNNING_PROFILES: int = int(os.environ.get("MAX_RUNNING_PROFILES", "0") or 0)
+
+# Section 2c: background proxy health-check interval in seconds (0 = off).
+PROXY_HEALTH_CHECK_INTERVAL: int = int(os.environ.get("PROXY_HEALTH_CHECK_INTERVAL", "0") or 0)
+
+# Section 4b: track active CDP WebSocket clients per profile (browser + page).
+cdp_clients: dict[str, int] = {}
+
+
+def _cdp_clients_inc(profile_id: str) -> None:
+    cdp_clients[profile_id] = cdp_clients.get(profile_id, 0) + 1
+
+
+def _cdp_clients_dec(profile_id: str) -> None:
+    cdp_clients[profile_id] = max(0, cdp_clients.get(profile_id, 0) - 1)
+
+
+# Loopback hostnames for the local-CDP exemption.
+_LOOPBACK_HOSTS = {"127.0.0.1", "[::1]", "::1", "localhost", "ip6-localhost", "ip6-loopback"}
+
+
+def _host_is_loopback(host_header: str) -> bool:
+    h = host_header.strip().lower()
+    if h.startswith("["):
+        h = h.split("]", 1)[0] + "]"
+    else:
+        h = h.split(":", 1)[0]
+    return h in _LOOPBACK_HOSTS
+
+
+def _scope_is_loopback(scope: Scope) -> bool:
+    """True if the request originated from loopback (client IP or Host header)."""
+    client = scope.get("client")
+    if client and client[0] in ("127.0.0.1", "::1"):
+        return True
+    for key, val in scope.get("headers", []):
+        if key == b"host" and _host_is_loopback(val.decode("latin-1")):
+            return True
+    return False
+
+
+def _is_local_cdp_path(path: str) -> bool:
+    return path.startswith("/api/profiles/") and "/cdp/local" in path
 
 # Paths that bypass authentication even when AUTH_TOKEN is set
 _AUTH_EXEMPT = frozenset({"/api/auth/status", "/api/auth/login", "/api/status"})
@@ -162,6 +227,11 @@ class AuthMiddleware:
             await self.app(scope, receive, send)
             return
 
+        # Section 4c: loopback-only, opt-in local CDP bypass (for bdg etc.)
+        if ALLOW_LOCAL_CDP and _is_local_cdp_path(path) and _scope_is_loopback(scope):
+            await self.app(scope, receive, send)
+            return
+
         if _check_auth(scope):
             await self.app(scope, receive, send)
             return
@@ -179,6 +249,29 @@ class AuthMiddleware:
 # ── Helpers ────────────────────────────────────────────────────────────────────
 
 
+def _cred_to_response(cred: dict) -> ProxyCredentialResponse:
+    """Build a ProxyCredentialResponse, materializing provider-linked creds."""
+    materialized = proxy_health.materialize_credential(cred)
+    return ProxyCredentialResponse(
+        id=cred["id"],
+        name=cred["name"],
+        scheme=materialized.get("scheme", cred.get("scheme", "socks5")),
+        host=materialized.get("host", cred.get("host", "")),
+        port=materialized.get("port", cred.get("port", 1080)),
+        username=materialized.get("username", cred.get("username", "")),
+        has_password=bool(materialized.get("password")),
+        proxy_url=db.build_proxy_url_from_credential(materialized),
+        provider_id=cred.get("provider_id"),
+        provider_location=cred.get("provider_location"),
+        last_status=cred.get("last_status"),
+        last_exit_ip=cred.get("last_exit_ip"),
+        last_country=cred.get("last_country"),
+        last_checked_at=cred.get("last_checked_at"),
+        created_at=cred["created_at"],
+        updated_at=cred["updated_at"],
+    )
+
+
 def _resolve_proxy_credential(profile: dict) -> ProxyCredentialResponse | None:
     """Resolve proxy_credential_id on a profile dict into a response model."""
     cred_id = profile.get("proxy_credential_id")
@@ -187,18 +280,58 @@ def _resolve_proxy_credential(profile: dict) -> ProxyCredentialResponse | None:
     cred = db.get_proxy_credential(cred_id)
     if not cred:
         return None
-    has_pw = bool(cred.get("password"))
-    return ProxyCredentialResponse(
-        id=cred["id"],
-        name=cred["name"],
-        scheme=cred.get("scheme", "socks5"),
-        host=cred.get("host", ""),
-        port=cred.get("port", 1080),
-        username=cred.get("username", ""),
-        has_password=has_pw,
-        proxy_url=db.build_proxy_url_from_credential(cred),
-        created_at=cred["created_at"],
-        updated_at=cred["updated_at"],
+    return _cred_to_response(cred)
+
+
+def _resolve_proxy_group(profile: dict) -> ProxyGroupResponse | None:
+    """Resolve proxy_group_id on a profile dict into a response model with members."""
+    group_id = profile.get("proxy_group_id")
+    if not group_id:
+        return None
+    group = db.get_proxy_group(group_id)
+    if not group:
+        return None
+    members = db.list_group_members(group_id)
+    return ProxyGroupResponse(
+        id=group["id"],
+        name=group["name"],
+        rotation_mode=group.get("rotation_mode", "round_robin"),
+        member_count=len(members),
+        members=[ProxyGroupMemberResponse(**m) for m in members],
+        created_at=group["created_at"],
+        updated_at=group["updated_at"],
+    )
+
+
+def _provider_to_response(p: dict) -> ProxyProviderResponse:
+    return ProxyProviderResponse(
+        id=p["id"],
+        name=p["name"],
+        type=p.get("type", "custom"),
+        scheme=p.get("scheme", "socks5"),
+        host_template=p.get("host_template", "") or "",
+        port=p.get("port", 1080),
+        username=p.get("username", ""),
+        has_password=bool(p.get("password")),
+        options=p.get("options") or {},
+        created_at=p["created_at"],
+        updated_at=p["updated_at"],
+    )
+
+
+def _group_to_response(group_id: str) -> ProxyGroupResponse | None:
+    group = db.get_proxy_group(group_id)
+    if not group:
+        return None
+    members = db.list_group_members(group_id)
+    return ProxyGroupResponse(
+        id=group["id"],
+        name=group["name"],
+        rotation_mode=group.get("rotation_mode", "round_robin"),
+        member_count=len(members),
+        members=[ProxyGroupMemberResponse(**m) for m in members],
+        created_at=group["created_at"],
+        updated_at=group["updated_at"],
     )
 
 
@@ -218,13 +351,17 @@ def _cdp_endpoint(profile_id: str, scope: Scope) -> str:
 
 
 def _enrich_profile(profile: dict, scope: Scope) -> ProfileResponse:
-    """Add runtime fields (status, proxy_credential, cdp_endpoint) to a profile dict."""
+    """Add runtime fields (status, proxy_credential, proxy_group, cdp_endpoint)."""
     profile_id = profile["id"]
     status = browser_mgr.get_status(profile_id)
     proxy_cred = _resolve_proxy_credential(profile)
+    proxy_group = _resolve_proxy_group(profile)
     profile_tags = profile.get("tags", [])
-    # Build kwargs dict without 'tags' to avoid duplicate kwarg
-    profile_fields = {k: v for k, v in profile.items() if k != "tags"}
+    # Filter dict-only/internal keys to avoid duplicate/unexpected kwargs.
+    profile_fields = {
+        k: v for k, v in profile.items()
+        if k not in ("tags", "proxy_assignment")
+    }
     return ProfileResponse(
         **profile_fields,
         status=status["status"],
@@ -232,6 +369,7 @@ def _enrich_profile(profile: dict, scope: Scope) -> ProfileResponse:
         cdp_url=status["cdp_url"],
         cdp_endpoint=_cdp_endpoint(profile_id, scope),
         proxy_credential=proxy_cred.model_dump() if proxy_cred else None,
+        proxy_group=proxy_group.model_dump() if proxy_group else None,
         tags=[TagResponse(**t) for t in profile_tags],
     )
 
@@ -440,13 +578,43 @@ async def lifespan(app: FastAPI):
     db.init_db()
     await browser_mgr.cleanup_stale()
     browser_mgr._auto_launch_task = asyncio.create_task(browser_mgr.auto_launch_all())
+    if PROXY_HEALTH_CHECK_INTERVAL > 0:
+        browser_mgr._health_task = asyncio.create_task(_proxy_health_loop(PROXY_HEALTH_CHECK_INTERVAL))
     logger.info("CloakBrowser Manager started")
     yield
     logger.info("Shutting down — stopping all browsers...")
     if browser_mgr._auto_launch_task and not browser_mgr._auto_launch_task.done():
         browser_mgr._auto_launch_task.cancel()
         await asyncio.gather(browser_mgr._auto_launch_task, return_exceptions=True)
+    if getattr(browser_mgr, "_health_task", None) and not browser_mgr._health_task.done():
+        browser_mgr._health_task.cancel()
+        await asyncio.gather(browser_mgr._health_task, return_exceptions=True)
     await browser_mgr.cleanup_all()
+
+
+async def _proxy_health_loop(interval: int) -> None:
+    """Periodically test every stored proxy credential and persist results."""
+    from . import proxy_health
+    logger.info("Proxy health check enabled (every %ds)", interval)
+    while True:
+        try:
+            await asyncio.sleep(interval)
+            for c in db.list_proxy_credentials():
+                try:
+                    result = await proxy_health.test_proxy(c)
+                    db.update_proxy_credential(
+                        c["id"],
+                        last_status="ok" if result["ok"] else "failed",
+                        last_exit_ip=result.get("exit_ip"),
+                        last_country=result.get("country"),
+                        last_checked_at=db._now(),
+                    )
+                except Exception as exc:  # pragma: no cover - defensive
+                    logger.debug("health check failed for %s: %s", c.get("id"), exc)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.debug("proxy health loop iteration error: %s", exc)
 
 
 app = FastAPI(title="CloakBrowser Manager", lifespan=lifespan)
@@ -562,18 +730,92 @@ async def delete_profile(profile_id: str):
 # ── Launch / Stop ─────────────────────────────────────────────────────────────
 
 
+def _resolve_bulk_ids(body: BulkIdsRequest) -> list[str]:
+    if body.ids:
+        return list(body.ids)
+    if body.tag:
+        profiles = db.list_profiles()
+        return [p["id"] for p in profiles if any(t["tag"] == body.tag for t in p.get("tags", []))]
+    return []
+
+
+# NB: bulk/clone endpoints are registered BEFORE the {profile_id} parameterized
+# routes below, otherwise /api/profiles/bulk/... would be captured by
+# /api/profiles/{profile_id}/... with profile_id == "bulk".
+
+
+@app.post("/api/profiles/bulk/launch", response_model=BulkResultResponse)
+async def bulk_launch(body: BulkIdsRequest):
+    ids = _resolve_bulk_ids(body)
+    results = []
+    for pid in ids:
+        try:
+            profile = db.get_profile(pid)
+            if not profile:
+                raise ValueError("Profile not found")
+            if profile.get("is_template"):
+                raise ValueError("Templates cannot be launched")
+            if pid in browser_mgr.running:
+                raise ValueError("Already running")
+            await browser_mgr.launch(profile)
+            results.append(BulkResultItem(id=pid, ok=True))
+        except Exception as exc:
+            results.append(BulkResultItem(id=pid, ok=False, error=str(exc)))
+    return BulkResultResponse(results=results)
+
+
+@app.post("/api/profiles/bulk/stop", response_model=BulkResultResponse)
+async def bulk_stop(body: BulkIdsRequest):
+    ids = _resolve_bulk_ids(body)
+    results = []
+    for pid in ids:
+        try:
+            if pid not in browser_mgr.running:
+                raise ValueError("Not running")
+            await browser_mgr.stop(pid)
+            results.append(BulkResultItem(id=pid, ok=True))
+        except Exception as exc:
+            results.append(BulkResultItem(id=pid, ok=False, error=str(exc)))
+    return BulkResultResponse(results=results)
+
+
+@app.post("/api/profiles/bulk/delete", response_model=BulkResultResponse)
+async def bulk_delete(body: BulkIdsRequest):
+    ids = _resolve_bulk_ids(body)
+    results = []
+    for pid in ids:
+        try:
+            if pid in browser_mgr.running:
+                await browser_mgr.stop(pid)
+            profile = db.get_profile(pid)
+            if not profile:
+                raise ValueError("Profile not found")
+            user_data_dir = Path(profile["user_data_dir"])
+            db.delete_profile(pid)
+            if user_data_dir.exists():
+                shutil.rmtree(user_data_dir, ignore_errors=True)
+            results.append(BulkResultItem(id=pid, ok=True))
+        except Exception as exc:
+            results.append(BulkResultItem(id=pid, ok=False, error=str(exc)))
+    return BulkResultResponse(results=results)
+
+
 @app.post("/api/profiles/{profile_id}/launch", response_model=LaunchResponse)
 async def launch_profile(profile_id: str, request: Request):
     profile = db.get_profile(profile_id)
     if not profile:
         raise HTTPException(status_code=404, detail="Profile not found")
+    if profile.get("is_template"):
+        raise HTTPException(status_code=409, detail="Templates cannot be launched")
     if profile_id in browser_mgr.running:
         raise HTTPException(status_code=409, detail="Profile is already running")
 
     try:
         running = await browser_mgr.launch(profile)
     except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc))
+        msg = str(exc)
+        status_code = 429 if msg.startswith("Max running") else 400
+        raise HTTPException(status_code=status_code, detail=msg)
     except Exception as exc:
         logger.error("Failed to launch profile %s: %s", profile_id, exc)
         raise HTTPException(status_code=500, detail="Failed to launch browser")
@@ -586,6 +828,14 @@ async def launch_profile(profile_id: str, request: Request):
         cdp_url=f"/api/profiles/{profile_id}/cdp",
         cdp_endpoint=_cdp_endpoint(profile_id, request.scope),
     )
+
+
+@app.post("/api/profiles/{profile_id}/clone", response_model=ProfileResponse)
+async def clone_profile(profile_id: str, body: CloneRequest, request: Request):
+    cloned = db.clone_profile(profile_id, new_name=body.name)
+    if not cloned:
+        raise HTTPException(status_code=404, detail="Profile not found")
+    return _enrich_profile(cloned, request.scope)
 
 
 @app.post("/api/profiles/{profile_id}/stop")
@@ -605,6 +855,7 @@ async def get_profile_status(profile_id: str, request: Request):
     return ProfileStatusResponse(
         **status,
         cdp_endpoint=_cdp_endpoint(profile_id, request.scope),
+        cdp_clients=cdp_clients.get(profile_id, 0),
     )
 
 
@@ -620,47 +871,25 @@ async def get_system_status():
         running_count=len(browser_mgr.running),
         binary_version=CHROMIUM_VERSION,
         profiles_total=len(profiles),
+        max_running=MAX_RUNNING_PROFILES or None,
     )
 
 
 # ── Proxy Credentials ──────────────────────────────────────────────────────────
 
 
+_TEST_FIELDS = ("ok", "exit_ip", "country", "timezone", "latency_ms", "error")
+
+
 @app.get("/api/proxy-credentials", response_model=list[ProxyCredentialResponse])
 async def list_proxy_credentials():
-    creds = db.list_proxy_credentials()
-    return [
-        ProxyCredentialResponse(
-            id=c["id"],
-            name=c["name"],
-            scheme=c.get("scheme", "socks5"),
-            host=c.get("host", ""),
-            port=c.get("port", 1080),
-            username=c.get("username", ""),
-            has_password=bool(c.get("password")),
-            proxy_url=db.build_proxy_url_from_credential(c),
-            created_at=c["created_at"],
-            updated_at=c["updated_at"],
-        )
-        for c in creds
-    ]
+    return [_cred_to_response(c) for c in db.list_proxy_credentials()]
 
 
 @app.post("/api/proxy-credentials", response_model=ProxyCredentialResponse, status_code=201)
 async def create_proxy_credential(req: ProxyCredentialCreate):
     cred = db.create_proxy_credential(**req.model_dump())
-    return ProxyCredentialResponse(
-        id=cred["id"],
-        name=cred["name"],
-        scheme=cred.get("scheme", "socks5"),
-        host=cred.get("host", ""),
-        port=cred.get("port", 1080),
-        username=cred.get("username", ""),
-        has_password=bool(cred.get("password")),
-        proxy_url=db.build_proxy_url_from_credential(cred),
-        created_at=cred["created_at"],
-        updated_at=cred["updated_at"],
-    )
+    return _cred_to_response(cred)  # type: ignore[arg-type]
 
 
 @app.get("/api/proxy-credentials/{cred_id}", response_model=ProxyCredentialResponse)
@@ -668,18 +897,7 @@ async def get_proxy_credential(cred_id: str):
     cred = db.get_proxy_credential(cred_id)
     if not cred:
         raise HTTPException(status_code=404, detail="Proxy credential not found")
-    return ProxyCredentialResponse(
-        id=cred["id"],
-        name=cred["name"],
-        scheme=cred.get("scheme", "socks5"),
-        host=cred.get("host", ""),
-        port=cred.get("port", 1080),
-        username=cred.get("username", ""),
-        has_password=bool(cred.get("password")),
-        proxy_url=db.build_proxy_url_from_credential(cred),
-        created_at=cred["created_at"],
-        updated_at=cred["updated_at"],
-    )
+    return _cred_to_response(cred)
 
 
 @app.put("/api/proxy-credentials/{cred_id}", response_model=ProxyCredentialResponse)
@@ -688,18 +906,7 @@ async def update_proxy_credential(cred_id: str, req: ProxyCredentialUpdate):
     cred = db.update_proxy_credential(cred_id, **data)
     if not cred:
         raise HTTPException(status_code=404, detail="Proxy credential not found")
-    return ProxyCredentialResponse(
-        id=cred["id"],
-        name=cred["name"],
-        scheme=cred.get("scheme", "socks5"),
-        host=cred.get("host", ""),
-        port=cred.get("port", 1080),
-        username=cred.get("username", ""),
-        has_password=bool(cred.get("password")),
-        proxy_url=db.build_proxy_url_from_credential(cred),
-        created_at=cred["created_at"],
-        updated_at=cred["updated_at"],
-    )
+    return _cred_to_response(cred)
 
 
 @app.delete("/api/proxy-credentials/{cred_id}")
@@ -711,9 +918,164 @@ async def delete_proxy_credential(cred_id: str):
             status_code=409,
             detail=f"Cannot delete: {count} profile(s) are using this credential",
         )
+    db.remove_credential_from_groups(cred_id)
     if not db.delete_proxy_credential(cred_id):
         raise HTTPException(status_code=404, detail="Proxy credential not found")
     return {"ok": True}
+
+
+@app.post("/api/proxy-credentials/{cred_id}/test", response_model=ProxyTestResult)
+async def test_proxy_credential(cred_id: str):
+    cred = db.get_proxy_credential(cred_id)
+    if not cred:
+        raise HTTPException(status_code=404, detail="Proxy credential not found")
+    result = await proxy_health.test_proxy(cred)
+    db.update_proxy_credential(
+        cred_id,
+        last_status="ok" if result["ok"] else "failed",
+        last_exit_ip=result.get("exit_ip"),
+        last_country=result.get("country"),
+        last_checked_at=db._now(),
+    )
+    return ProxyTestResult(id=cred_id, **{k: result[k] for k in _TEST_FIELDS})
+
+
+@app.post("/api/proxy-credentials/test-all", response_model=list[ProxyTestResult])
+async def test_all_proxy_credentials():
+    out: list[ProxyTestResult] = []
+    for c in db.list_proxy_credentials():
+        result = await proxy_health.test_proxy(c)
+        db.update_proxy_credential(
+            c["id"],
+            last_status="ok" if result["ok"] else "failed",
+            last_exit_ip=result.get("exit_ip"),
+            last_country=result.get("country"),
+            last_checked_at=db._now(),
+        )
+        out.append(ProxyTestResult(id=c["id"], **{k: result[k] for k in _TEST_FIELDS}))
+    return out
+
+
+# ── Proxy Providers & Locations ───────────────────────────────────────────────
+
+
+@app.get("/api/proxy-locations")
+async def get_proxy_locations():
+    return proxy_health.PROXY_LOCATIONS
+
+
+@app.get("/api/proxy-providers", response_model=list[ProxyProviderResponse])
+async def list_proxy_providers():
+    return [_provider_to_response(p) for p in db.list_proxy_providers()]
+
+
+@app.post("/api/proxy-providers", response_model=ProxyProviderResponse, status_code=201)
+async def create_proxy_provider(req: ProxyProviderCreate):
+    provider = db.create_proxy_provider(**req.model_dump())
+    return _provider_to_response(provider)  # type: ignore[arg-type]
+
+
+@app.get("/api/proxy-providers/{provider_id}", response_model=ProxyProviderResponse)
+async def get_proxy_provider(provider_id: str):
+    p = db.get_proxy_provider(provider_id)
+    if not p:
+        raise HTTPException(status_code=404, detail="Proxy provider not found")
+    return _provider_to_response(p)
+
+
+@app.put("/api/proxy-providers/{provider_id}", response_model=ProxyProviderResponse)
+async def update_proxy_provider(provider_id: str, req: ProxyProviderUpdate):
+    data = req.model_dump(exclude_unset=True)
+    p = db.update_proxy_provider(provider_id, **data)
+    if not p:
+        raise HTTPException(status_code=404, detail="Proxy provider not found")
+    return _provider_to_response(p)
+
+
+@app.delete("/api/proxy-providers/{provider_id}")
+async def delete_proxy_provider(provider_id: str):
+    count = db.count_credentials_using_provider(provider_id)
+    if count > 0:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Cannot delete: {count} credential(s) reference this provider",
+        )
+    if not db.delete_proxy_provider(provider_id):
+        raise HTTPException(status_code=404, detail="Proxy provider not found")
+    return {"ok": True}
+
+
+# ── Proxy Groups ──────────────────────────────────────────────────────────────
+
+
+@app.get("/api/proxy-groups", response_model=list[ProxyGroupResponse])
+async def list_proxy_groups():
+    groups = db.list_proxy_groups()
+    out: list[ProxyGroupResponse] = []
+    for g in groups:
+        resp = _group_to_response(g["id"])
+        if resp:
+            out.append(resp)
+    return out
+
+
+@app.post("/api/proxy-groups", response_model=ProxyGroupResponse, status_code=201)
+async def create_proxy_group(req: ProxyGroupCreate):
+    g = db.create_proxy_group(**req.model_dump())
+    return _group_to_response(g["id"])  # type: ignore[return-value]
+
+
+@app.get("/api/proxy-groups/{group_id}", response_model=ProxyGroupResponse)
+async def get_proxy_group_endpoint(group_id: str):
+    resp = _group_to_response(group_id)
+    if not resp:
+        raise HTTPException(status_code=404, detail="Proxy group not found")
+    return resp
+
+
+@app.put("/api/proxy-groups/{group_id}", response_model=ProxyGroupResponse)
+async def update_proxy_group(group_id: str, req: ProxyGroupUpdate):
+    g = db.update_proxy_group(group_id, **req.model_dump(exclude_unset=True))
+    if not g:
+        raise HTTPException(status_code=404, detail="Proxy group not found")
+    return _group_to_response(group_id)  # type: ignore[return-value]
+
+
+@app.delete("/api/proxy-groups/{group_id}")
+async def delete_proxy_group(group_id: str):
+    count = db.count_profiles_using_group(group_id)
+    if count > 0:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Cannot delete: {count} profile(s) are using this group",
+        )
+    if not db.delete_proxy_group(group_id):
+        raise HTTPException(status_code=404, detail="Proxy group not found")
+    return {"ok": True}
+
+
+@app.put("/api/proxy-groups/{group_id}/members", response_model=ProxyGroupResponse)
+async def set_proxy_group_members(group_id: str, body: GroupMembersUpdate):
+    if not db.get_proxy_group(group_id):
+        raise HTTPException(status_code=404, detail="Proxy group not found")
+    db.set_group_members(group_id, body.credential_ids)
+    return _group_to_response(group_id)  # type: ignore[return-value]
+
+
+@app.post("/api/proxy-groups/{group_id}/members/{cred_id}", response_model=ProxyGroupResponse)
+async def add_proxy_group_member(group_id: str, cred_id: str):
+    if not db.get_proxy_group(group_id):
+        raise HTTPException(status_code=404, detail="Proxy group not found")
+    if not db.get_proxy_credential(cred_id):
+        raise HTTPException(status_code=404, detail="Proxy credential not found")
+    db.add_group_member(group_id, cred_id)
+    return _group_to_response(group_id)  # type: ignore[return-value]
+
+
+@app.delete("/api/proxy-groups/{group_id}/members/{cred_id}", response_model=ProxyGroupResponse)
+async def remove_proxy_group_member(group_id: str, cred_id: str):
+    db.remove_group_member(group_id, cred_id)
+    return _group_to_response(group_id)  # type: ignore[return-value]
 
 
 # ── Clipboard Relay ──────────────────────────────────────────────────────────
@@ -992,25 +1354,26 @@ async def cdp_info(profile_id: str):
     }
 
 
-@app.get("/api/profiles/{profile_id}/cdp/json/version/")
-@app.get("/api/profiles/{profile_id}/cdp/json/version")
-async def cdp_json_version(profile_id: str, request: Request):
-    """Proxy Chrome's /json/version, rewriting WS URLs to go through our proxy."""
+async def _fetch_cdp_json(profile_id: str, chrome_path: str) -> dict:
     running = browser_mgr.running.get(profile_id)
     if not running:
         raise HTTPException(status_code=404, detail="Profile not running")
-
     try:
         async with httpx.AsyncClient() as client:
             resp = await client.get(
-                f"http://127.0.0.1:{running.cdp_port}/json/version", timeout=5
+                f"http://127.0.0.1:{running.cdp_port}{chrome_path}", timeout=5
             )
-            data = resp.json()
+            return resp.json()
     except Exception as exc:
         logger.error("CDP proxy: failed to reach Chrome CDP for %s: %s", profile_id, exc)
         raise HTTPException(status_code=502, detail="CDP endpoint unreachable")
 
-    # Rewrite webSocketDebuggerUrl to point through our proxy
+
+@app.get("/api/profiles/{profile_id}/cdp/json/version/")
+@app.get("/api/profiles/{profile_id}/cdp/json/version")
+async def cdp_json_version(profile_id: str, request: Request):
+    """Proxy Chrome's /json/version, rewriting WS URLs to go through our proxy."""
+    data = await _fetch_cdp_json(profile_id, "/json/version")
     host = request.headers.get("host", "localhost:8080")
     ws_scheme = "wss" if _is_https(request) else "ws"
     data["webSocketDebuggerUrl"] = f"{ws_scheme}://{host}/api/profiles/{profile_id}/cdp"
@@ -1023,20 +1386,7 @@ async def cdp_json_version(profile_id: str, request: Request):
 @app.get("/api/profiles/{profile_id}/cdp/json")
 async def cdp_json_list(profile_id: str, request: Request):
     """Proxy Chrome's /json/list, rewriting WS URLs."""
-    running = browser_mgr.running.get(profile_id)
-    if not running:
-        raise HTTPException(status_code=404, detail="Profile not running")
-
-    try:
-        async with httpx.AsyncClient() as client:
-            resp = await client.get(
-                f"http://127.0.0.1:{running.cdp_port}/json/list", timeout=5
-            )
-            data = resp.json()
-    except Exception as exc:
-        logger.error("CDP proxy: failed to reach Chrome CDP for %s: %s", profile_id, exc)
-        raise HTTPException(status_code=502, detail="CDP endpoint unreachable")
-
+    data = await _fetch_cdp_json(profile_id, "/json/list")
     host = request.headers.get("host", "localhost:8080")
     ws_scheme = "wss" if _is_https(request) else "ws"
     for entry in data:
@@ -1048,15 +1398,50 @@ async def cdp_json_list(profile_id: str, request: Request):
     return data
 
 
+# ── Local CDP (loopback-only, opt-in via ALLOW_LOCAL_CDP) ─────────────────────
+# Lets local tools like bdg connect to page-level CDP without an auth-injecting
+# bridge. The AuthMiddleware exempts these paths only when the request is from
+# loopback (client IP or Host header) and ALLOW_LOCAL_CDP is set.
+
+
+@app.get("/api/profiles/{profile_id}/cdp/local/json/version/")
+@app.get("/api/profiles/{profile_id}/cdp/local/json/version")
+async def cdp_local_json_version(profile_id: str, request: Request):
+    data = await _fetch_cdp_json(profile_id, "/json/version")
+    host = request.headers.get("host", "localhost:8080")
+    data["webSocketDebuggerUrl"] = f"ws://{host}/api/profiles/{profile_id}/cdp/local"
+    return data
+
+
+@app.get("/api/profiles/{profile_id}/cdp/local/json/list/")
+@app.get("/api/profiles/{profile_id}/cdp/local/json/list")
+@app.get("/api/profiles/{profile_id}/cdp/local/json/")
+@app.get("/api/profiles/{profile_id}/cdp/local/json")
+async def cdp_local_json_list(profile_id: str, request: Request):
+    data = await _fetch_cdp_json(profile_id, "/json/list")
+    host = request.headers.get("host", "localhost:8080")
+    for entry in data:
+        if "webSocketDebuggerUrl" in entry:
+            ws_path = entry["webSocketDebuggerUrl"].split("/devtools/")[-1]
+            entry["webSocketDebuggerUrl"] = (
+                f"ws://{host}/api/profiles/{profile_id}/cdp/local/devtools/{ws_path}"
+            )
+    return data
+
+
 async def _proxy_cdp_websocket(
     websocket: WebSocket, target_url: str, label: str,
+    profile_id: str | None = None,
 ) -> None:
     """Bidirectional WebSocket proxy between a FastAPI client and a CDP target.
 
-    Used by both browser-level and page-level CDP proxy endpoints.
+    Used by both browser-level and page-level CDP proxy endpoints. If
+    profile_id is given, the active-CDP-client counter is maintained for it.
     """
     import websockets
 
+    if profile_id:
+        _cdp_clients_inc(profile_id)
     try:
         async with websockets.connect(
             target_url, max_size=None, ping_interval=None, ping_timeout=None
@@ -1102,6 +1487,8 @@ async def _proxy_cdp_websocket(
     except Exception as exc:
         logger.error("%s error: %s", label, exc)
     finally:
+        if profile_id:
+            _cdp_clients_dec(profile_id)
         try:
             await websocket.close()
         except Exception as exc:
@@ -1133,7 +1520,7 @@ async def cdp_proxy(websocket: WebSocket, profile_id: str):
         await websocket.close(code=4005, reason="CDP not available")
         return
 
-    await _proxy_cdp_websocket(websocket, ws_url, f"CDP proxy [{profile_id}]")
+    await _proxy_cdp_websocket(websocket, ws_url, f"CDP proxy [{profile_id}]", profile_id)
 
 
 @app.websocket("/api/profiles/{profile_id}/cdp/devtools/{path:path}")
@@ -1150,7 +1537,52 @@ async def cdp_page_proxy(websocket: WebSocket, profile_id: str, path: str):
     await websocket.accept()
 
     target_url = f"ws://127.0.0.1:{running.cdp_port}/devtools/{path}"
-    await _proxy_cdp_websocket(websocket, target_url, f"CDP page proxy [{profile_id}]")
+    await _proxy_cdp_websocket(websocket, target_url, f"CDP page proxy [{profile_id}]", profile_id)
+
+
+# ── Local CDP WebSocket routes (loopback-only, opt-in) ────────────────────────
+
+
+@app.websocket("/api/profiles/{profile_id}/cdp/local")
+async def cdp_local_proxy(websocket: WebSocket, profile_id: str):
+    """Browser-level CDP over the auth-free local path."""
+    if not await _check_websocket_origin(websocket):
+        return
+
+    running = browser_mgr.running.get(profile_id)
+    if not running:
+        await websocket.close(code=4004, reason="Profile not running")
+        return
+
+    await websocket.accept()
+    try:
+        async with httpx.AsyncClient() as client:
+            resp = await client.get(
+                f"http://127.0.0.1:{running.cdp_port}/json/version", timeout=5
+            )
+            ws_url = resp.json()["webSocketDebuggerUrl"]
+    except Exception as exc:
+        logger.error("local CDP: failed to get WS URL for %s: %s", profile_id, exc)
+        await websocket.close(code=4005, reason="CDP not available")
+        return
+
+    await _proxy_cdp_websocket(websocket, ws_url, f"CDP local [{profile_id}]", profile_id)
+
+
+@app.websocket("/api/profiles/{profile_id}/cdp/local/devtools/{path:path}")
+async def cdp_local_page_proxy(websocket: WebSocket, profile_id: str, path: str):
+    """Page-level CDP over the auth-free local path (for bdg etc.)."""
+    if not await _check_websocket_origin(websocket):
+        return
+
+    running = browser_mgr.running.get(profile_id)
+    if not running:
+        await websocket.close(code=4004, reason="Profile not running")
+        return
+
+    await websocket.accept()
+    target_url = f"ws://127.0.0.1:{running.cdp_port}/devtools/{path}"
+    await _proxy_cdp_websocket(websocket, target_url, f"CDP local page [{profile_id}]", profile_id)
 
 
 # ── Static Frontend ───────────────────────────────────────────────────────────

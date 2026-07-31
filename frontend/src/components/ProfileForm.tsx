@@ -1,10 +1,11 @@
 import { Save, Trash2, X, Copy, Check, Code2 } from "lucide-react";
 import { useEffect, useState } from "react";
-import type { Profile, ProfileCreateData, ProxyCredential } from "../lib/api";
+import type { Profile, ProfileCreateData, ProxyCredential, ProxyGroup } from "../lib/api";
 
 interface ProfileFormProps {
   profile: Profile | null; // null = create mode
   proxyCredentials: ProxyCredential[];
+  proxyGroups: ProxyGroup[];
   onSave: (data: ProfileCreateData) => Promise<void>;
   onDelete?: () => Promise<void>;
   onCancel: () => void;
@@ -53,7 +54,7 @@ const GPU_PRESETS: Record<string, { vendor: string; renderer: string }> = {
   },
 };
 
-export function ProfileForm({ profile, proxyCredentials, onSave, onDelete, onCancel }: ProfileFormProps) {
+export function ProfileForm({ profile, proxyCredentials, proxyGroups, onSave, onDelete, onCancel }: ProfileFormProps) {
   const isEdit = profile !== null;
 
   const [form, setForm] = useState<ProfileCreateData>({
@@ -69,9 +70,12 @@ export function ProfileForm({ profile, proxyCredentials, onSave, onDelete, onCan
     auto_launch: false,
     launch_args: [],
     tags: [],
+    is_template: false,
+    restart_on_crash: false,
+    max_restarts: 5,
   });
 
-  const [proxyMode, setProxyMode] = useState<"none" | "credential" | "custom">("none");
+  const [proxyMode, setProxyMode] = useState<"none" | "credential" | "group" | "custom">("none");
   const [saving, setSaving] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [tagInput, setTagInput] = useState("");
@@ -86,6 +90,7 @@ export function ProfileForm({ profile, proxyCredentials, onSave, onDelete, onCan
         fingerprint_seed: profile.fingerprint_seed,
         proxy: profile.proxy,
         proxy_credential_id: profile.proxy_credential_id,
+        proxy_group_id: profile.proxy_group_id,
         timezone: profile.timezone,
         locale: profile.locale,
         platform: profile.platform,
@@ -105,8 +110,13 @@ export function ProfileForm({ profile, proxyCredentials, onSave, onDelete, onCan
         launch_args: profile.launch_args ?? [],
         notes: profile.notes,
         tags: profile.tags ?? [],
+        is_template: profile.is_template,
+        restart_on_crash: profile.restart_on_crash,
+        max_restarts: profile.max_restarts,
       });
-      if (profile.proxy_credential_id) {
+      if (profile.proxy_group_id) {
+        setProxyMode("group");
+      } else if (profile.proxy_credential_id) {
         setProxyMode("credential");
       } else if (profile.proxy) {
         setProxyMode("custom");
@@ -182,15 +192,21 @@ export function ProfileForm({ profile, proxyCredentials, onSave, onDelete, onCan
     set("launch_args", (form.launch_args ?? []).filter((_, i) => i !== idx));
   };
 
-  const handleProxyMode = (mode: "none" | "credential" | "custom") => {
+  const handleProxyMode = (mode: "none" | "credential" | "group" | "custom") => {
     setProxyMode(mode);
     if (mode === "none") {
       set("proxy", null);
       set("proxy_credential_id", null);
+      set("proxy_group_id", null);
     } else if (mode === "credential") {
       set("proxy", null);
+      set("proxy_group_id", null);
+    } else if (mode === "group") {
+      set("proxy", null);
+      set("proxy_credential_id", null);
     } else {
       set("proxy_credential_id", null);
+      set("proxy_group_id", null);
     }
   };
 
@@ -289,6 +305,15 @@ export function ProfileForm({ profile, proxyCredentials, onSave, onDelete, onCan
               </div>
             </div>
           </div>
+          <label className="flex items-center gap-2 text-sm text-gray-300 cursor-pointer mt-4">
+            <input
+              type="checkbox"
+              checked={form.is_template ?? false}
+              onChange={(e) => set("is_template", e.target.checked)}
+              className="rounded border-border bg-surface-2"
+            />
+            This is a template (cannot be launched; used as a starting point for duplication)
+          </label>
         </section>
 
         {/* Network */}
@@ -299,7 +324,7 @@ export function ProfileForm({ profile, proxyCredentials, onSave, onDelete, onCan
             <div>
               <label className="label">Proxy</label>
               <div className="flex gap-1 mb-2">
-                {(["none", "credential", "custom"] as const).map((mode) => (
+                {(["none", "credential", "group", "custom"] as const).map((mode) => (
                   <button
                     key={mode}
                     type="button"
@@ -310,7 +335,7 @@ export function ProfileForm({ profile, proxyCredentials, onSave, onDelete, onCan
                         : "bg-surface-3 text-gray-400 hover:text-gray-200"
                     }`}
                   >
-                    {mode === "none" ? "None" : mode === "credential" ? "Saved Credential" : "Custom URL"}
+                    {mode === "none" ? "None" : mode === "credential" ? "Credential" : mode === "group" ? "Group" : "Custom URL"}
                   </button>
                 ))}
               </div>
@@ -325,6 +350,21 @@ export function ProfileForm({ profile, proxyCredentials, onSave, onDelete, onCan
                   {proxyCredentials.map((c) => (
                     <option key={c.id} value={c.id}>
                       {c.name} ({c.scheme}://{c.host}:{c.port})
+                    </option>
+                  ))}
+                </select>
+              )}
+
+              {proxyMode === "group" && (
+                <select
+                  className="input"
+                  value={form.proxy_group_id ?? ""}
+                  onChange={(e) => set("proxy_group_id", e.target.value || null)}
+                >
+                  <option value="">Select proxy group...</option>
+                  {proxyGroups.map((g) => (
+                    <option key={g.id} value={g.id}>
+                      {g.name} ({g.rotation_mode.replace("_", " ")}, {g.member_count} members)
                     </option>
                   ))}
                 </select>
@@ -543,6 +583,31 @@ export function ProfileForm({ profile, proxyCredentials, onSave, onDelete, onCan
               />
               Launch automatically when container starts
             </label>
+            <label className="flex items-center gap-2 text-sm text-gray-300 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={form.restart_on_crash ?? false}
+                onChange={(e) => set("restart_on_crash", e.target.checked)}
+                className="rounded border-border bg-surface-2"
+              />
+              Restart automatically on unexpected crash
+            </label>
+            {form.restart_on_crash && (
+              <div>
+                <label className="label">Max Restarts</label>
+                <input
+                  className="input no-spin"
+                  type="number"
+                  min={1}
+                  max={100}
+                  value={form.max_restarts ?? 5}
+                  onChange={(e) => set("max_restarts", e.target.value ? Number(e.target.value) : 5)}
+                />
+                <p className="text-[10px] text-gray-500 mt-1">
+                  Backoff is exponential (2^n, capped at 60s) between attempts.
+                </p>
+              </div>
+            )}
             <div>
               <label className="label">Color Scheme</label>
               <select
