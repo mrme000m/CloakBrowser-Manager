@@ -7,10 +7,52 @@ from typing import Literal
 from pydantic import BaseModel, Field, field_validator
 
 
+class ProxyCredentialCreate(BaseModel):
+    name: str
+    scheme: Literal["http", "https", "socks5"] = "socks5"
+    host: str
+    port: int = 1080
+    username: str = ""
+    password: str = ""
+
+
+class ProxyCredentialUpdate(BaseModel):
+    name: str | None = None
+    scheme: Literal["http", "https", "socks5"] | None = None
+    host: str | None = None
+    port: int | None = None
+    username: str | None = None
+    password: str | None = None
+
+
+class ProxyCredentialResponse(BaseModel):
+    id: str
+    name: str
+    scheme: str = "socks5"
+    host: str
+    port: int = 1080
+    username: str = ""
+    has_password: bool = False
+    proxy_url: str = ""
+    created_at: str
+    updated_at: str
+
+
+class TagCreate(BaseModel):
+    tag: str
+    color: str | None = None  # hex color
+
+
+class TagResponse(BaseModel):
+    tag: str
+    color: str | None = None
+
+
 class ProfileCreate(BaseModel):
     name: str
     fingerprint_seed: int | None = None  # random if not set
     proxy: str | None = None  # "http://user:pass@host:port" or null
+    proxy_credential_id: str | None = None  # reference to saved proxy credential
     timezone: str | None = None  # "America/New_York"
     locale: str | None = None  # "en-US"
     platform: Literal["windows", "macos", "linux"] = "windows"
@@ -36,6 +78,7 @@ class ProfileUpdate(BaseModel):
     name: str | None = None
     fingerprint_seed: int | None = None
     proxy: str | None = Field(default=None)
+    proxy_credential_id: str | None = Field(default=None)
     timezone: str | None = Field(default=None)
     locale: str | None = Field(default=None)
     platform: Literal["windows", "macos", "linux"] | None = None
@@ -57,21 +100,13 @@ class ProfileUpdate(BaseModel):
     tags: list[TagCreate] | None = None
 
 
-class TagCreate(BaseModel):
-    tag: str
-    color: str | None = None  # hex color
-
-
-class TagResponse(BaseModel):
-    tag: str
-    color: str | None = None
-
-
 class ProfileResponse(BaseModel):
     id: str
     name: str
     fingerprint_seed: int
     proxy: str | None = None
+    proxy_credential_id: str | None = None
+    proxy_credential: ProxyCredentialResponse | None = None
     timezone: str | None = None
     locale: str | None = None
     platform: str = "windows"
@@ -103,6 +138,7 @@ class ProfileResponse(BaseModel):
     status: str = "stopped"  # "running" | "stopped"
     vnc_ws_port: int | None = None
     cdp_url: str | None = None
+    cdp_endpoint: str | None = None  # full ws://host:port/api/profiles/{id}/cdp
 
 
 class LaunchResponse(BaseModel):
@@ -111,6 +147,7 @@ class LaunchResponse(BaseModel):
     vnc_ws_port: int
     display: str
     cdp_url: str | None = None
+    cdp_endpoint: str | None = None  # full ws:// URL
 
 
 class StatusResponse(BaseModel):
@@ -124,6 +161,7 @@ class ProfileStatusResponse(BaseModel):
     vnc_ws_port: int | None = None
     display: str | None = None
     cdp_url: str | None = None
+    cdp_endpoint: str | None = None
 
 
 class ClipboardRequest(BaseModel):

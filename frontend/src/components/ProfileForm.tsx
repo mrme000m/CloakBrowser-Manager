@@ -1,9 +1,10 @@
-import { Save, Trash2, X } from "lucide-react";
+import { Save, Trash2, X, Copy, Check, Code2 } from "lucide-react";
 import { useEffect, useState } from "react";
-import type { Profile, ProfileCreateData } from "../lib/api";
+import type { Profile, ProfileCreateData, ProxyCredential } from "../lib/api";
 
 interface ProfileFormProps {
   profile: Profile | null; // null = create mode
+  proxyCredentials: ProxyCredential[];
   onSave: (data: ProfileCreateData) => Promise<void>;
   onDelete?: () => Promise<void>;
   onCancel: () => void;
@@ -52,7 +53,7 @@ const GPU_PRESETS: Record<string, { vendor: string; renderer: string }> = {
   },
 };
 
-export function ProfileForm({ profile, onSave, onDelete, onCancel }: ProfileFormProps) {
+export function ProfileForm({ profile, proxyCredentials, onSave, onDelete, onCancel }: ProfileFormProps) {
   const isEdit = profile !== null;
 
   const [form, setForm] = useState<ProfileCreateData>({
@@ -70,11 +71,13 @@ export function ProfileForm({ profile, onSave, onDelete, onCancel }: ProfileForm
     tags: [],
   });
 
+  const [proxyMode, setProxyMode] = useState<"none" | "credential" | "custom">("none");
   const [saving, setSaving] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [tagInput, setTagInput] = useState("");
   const [tagColor, setTagColor] = useState<string | null>("#6366f1");
   const [launchArgInput, setLaunchArgInput] = useState("");
+  const [cdpCopied, setCdpCopied] = useState(false);
 
   useEffect(() => {
     if (profile) {
@@ -82,6 +85,7 @@ export function ProfileForm({ profile, onSave, onDelete, onCancel }: ProfileForm
         name: profile.name,
         fingerprint_seed: profile.fingerprint_seed,
         proxy: profile.proxy,
+        proxy_credential_id: profile.proxy_credential_id,
         timezone: profile.timezone,
         locale: profile.locale,
         platform: profile.platform,
@@ -102,6 +106,13 @@ export function ProfileForm({ profile, onSave, onDelete, onCancel }: ProfileForm
         notes: profile.notes,
         tags: profile.tags ?? [],
       });
+      if (profile.proxy_credential_id) {
+        setProxyMode("credential");
+      } else if (profile.proxy) {
+        setProxyMode("custom");
+      } else {
+        setProxyMode("none");
+      }
     }
   }, [profile?.id]);
 
@@ -169,6 +180,18 @@ export function ProfileForm({ profile, onSave, onDelete, onCancel }: ProfileForm
 
   const removeLaunchArg = (idx: number) => {
     set("launch_args", (form.launch_args ?? []).filter((_, i) => i !== idx));
+  };
+
+  const handleProxyMode = (mode: "none" | "credential" | "custom") => {
+    setProxyMode(mode);
+    if (mode === "none") {
+      set("proxy", null);
+      set("proxy_credential_id", null);
+    } else if (mode === "credential") {
+      set("proxy", null);
+    } else {
+      set("proxy_credential_id", null);
+    }
   };
 
   return (
@@ -245,26 +268,20 @@ export function ProfileForm({ profile, onSave, onDelete, onCancel }: ProfileForm
                   title="Randomize seed"
                 >
                   <svg className="h-5 w-5" viewBox="0 0 32 32" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round">
-                    {/* Right face - lightest */}
                     <polygon points="28,10 16,16 16,28 28,22" fill="currentColor" opacity="0.06" />
                     <polygon points="28,10 16,16 16,28 28,22" />
-                    {/* Left face - medium shade */}
                     <polygon points="4,10 16,16 16,28 4,22" fill="currentColor" opacity="0.2" />
                     <polygon points="4,10 16,16 16,28 4,22" />
-                    {/* Top face - brightest */}
                     <polygon points="16,3 28,10 16,16 4,10" fill="currentColor" opacity="0.1" />
                     <polygon points="16,3 28,10 16,16 4,10" />
-                    {/* Dots on top face (3 - diagonal) */}
                     <circle cx="11.5" cy="8.5" r="1" fill="currentColor" opacity="0.7" />
                     <circle cx="16" cy="9.5" r="1" fill="currentColor" opacity="0.7" />
                     <circle cx="20.5" cy="10.5" r="1" fill="currentColor" opacity="0.7" />
-                    {/* Dots on left face (5 - dice pattern) */}
                     <circle cx="7.5" cy="14" r="0.9" fill="currentColor" opacity="0.6" />
                     <circle cx="12.5" cy="16.5" r="0.9" fill="currentColor" opacity="0.6" />
                     <circle cx="10" cy="19" r="0.9" fill="currentColor" opacity="0.6" />
                     <circle cx="7.5" cy="22" r="0.9" fill="currentColor" opacity="0.6" />
                     <circle cx="12.5" cy="24.5" r="0.9" fill="currentColor" opacity="0.6" />
-                    {/* Dots on right face (2 - diagonal) */}
                     <circle cx="20" cy="15" r="0.9" fill="currentColor" opacity="0.5" />
                     <circle cx="24" cy="20" r="0.9" fill="currentColor" opacity="0.5" />
                   </svg>
@@ -278,15 +295,51 @@ export function ProfileForm({ profile, onSave, onDelete, onCancel }: ProfileForm
         <section>
           <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-3">Network</h3>
           <div className="space-y-3">
+            {/* Proxy mode selector */}
             <div>
               <label className="label">Proxy</label>
-              <input
-                className="input"
-                value={form.proxy ?? ""}
-                onChange={(e) => set("proxy", e.target.value || null)}
-                placeholder="http://user:pass@host:port"
-              />
+              <div className="flex gap-1 mb-2">
+                {(["none", "credential", "custom"] as const).map((mode) => (
+                  <button
+                    key={mode}
+                    type="button"
+                    onClick={() => handleProxyMode(mode)}
+                    className={`text-xs px-3 py-1 rounded-md transition-colors ${
+                      proxyMode === mode
+                        ? "bg-accent text-white"
+                        : "bg-surface-3 text-gray-400 hover:text-gray-200"
+                    }`}
+                  >
+                    {mode === "none" ? "None" : mode === "credential" ? "Saved Credential" : "Custom URL"}
+                  </button>
+                ))}
+              </div>
+
+              {proxyMode === "credential" && (
+                <select
+                  className="input"
+                  value={form.proxy_credential_id ?? ""}
+                  onChange={(e) => set("proxy_credential_id", e.target.value || null)}
+                >
+                  <option value="">Select saved credential...</option>
+                  {proxyCredentials.map((c) => (
+                    <option key={c.id} value={c.id}>
+                      {c.name} ({c.scheme}://{c.host}:{c.port})
+                    </option>
+                  ))}
+                </select>
+              )}
+
+              {proxyMode === "custom" && (
+                <input
+                  className="input"
+                  value={form.proxy ?? ""}
+                  onChange={(e) => set("proxy", e.target.value || null)}
+                  placeholder="socks5://user:pass@host:1080"
+                />
+              )}
             </div>
+
             <div className="grid grid-cols-2 gap-3">
               <div>
                 <label className="label">Timezone</label>
@@ -409,6 +462,42 @@ export function ProfileForm({ profile, onSave, onDelete, onCancel }: ProfileForm
             </div>
           </div>
         </section>
+
+        {/* CDP Endpoint */}
+        {isEdit && profile.cdp_endpoint && (
+          <section>
+            <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-3">CDP Endpoint</h3>
+            <div className="bg-surface-2 border border-border rounded-md p-3">
+              <div className="flex items-center gap-2 mb-2">
+                <Code2 className="h-3.5 w-3.5 text-accent" />
+                <span className="text-xs font-medium text-gray-300">
+                  {profile.status === "running" ? "Browser CDP (running)" : "CDP URL (launch to connect)"}
+                </span>
+              </div>
+              <div className="flex items-center gap-2">
+                <code className="flex-1 text-xs text-gray-400 font-mono break-all bg-surface-3 rounded px-2 py-1.5 select-all">
+                  {profile.cdp_endpoint}
+                </code>
+                <button
+                  type="button"
+                  onClick={() => {
+                    navigator.clipboard?.writeText(profile.cdp_endpoint ?? "").then(() => {
+                      setCdpCopied(true);
+                      setTimeout(() => setCdpCopied(false), 2000);
+                    });
+                  }}
+                  className={`p-1.5 rounded ${cdpCopied ? "text-emerald-400" : "text-gray-500 hover:text-gray-300"}`}
+                  title={cdpCopied ? "Copied!" : "Copy CDP URL"}
+                >
+                  {cdpCopied ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
+                </button>
+              </div>
+              <p className="text-[10px] text-gray-500 mt-1.5">
+                Use with chrome-devtools-mcp: <code className="text-accent">--wsEndpoint={profile.cdp_endpoint}</code>
+              </p>
+            </div>
+          </section>
+        )}
 
         {/* Behavior */}
         <section>

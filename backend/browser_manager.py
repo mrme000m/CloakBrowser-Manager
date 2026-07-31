@@ -14,6 +14,7 @@ from typing import Any
 
 from cloakbrowser import launch_persistent_context_async
 
+from . import database as db
 from .vnc_manager import VNCManager
 
 logger = logging.getLogger("cloakbrowser.manager.browser")
@@ -36,6 +37,26 @@ def _normalize_proxy(raw: str) -> str:
     if len(parts) == 2:
         return f"http://{raw}"
     return raw
+
+
+def _resolve_proxy_url(profile: dict[str, Any]) -> str | None:
+    """Resolve the proxy URL for a profile.
+
+    Priority:
+      1. Explicit proxy field from the profile
+      2. proxy_credential_id → lookup credential and build URL
+    """
+    raw_proxy = profile.get("proxy") or None
+    if raw_proxy:
+        return _normalize_proxy(raw_proxy)
+
+    cred_id = profile.get("proxy_credential_id")
+    if cred_id:
+        cred = db.get_proxy_credential(cred_id)
+        if cred:
+            return db.build_proxy_url_from_credential(cred)
+
+    return None
 
 
 def _validate_proxy(url: str) -> None:
@@ -206,9 +227,8 @@ class BrowserManager:
             extra_args += profile.get("launch_args") or []
             extra_args.append(f"--remote-debugging-port={cdp_port}")
 
-            # Normalize proxy format (host:port:user:pass → http://user:pass@host:port)
-            raw_proxy = profile.get("proxy") or None
-            proxy = _normalize_proxy(raw_proxy) if raw_proxy else None
+            # Resolve proxy (explicit field takes priority, then credential)
+            proxy = _resolve_proxy_url(profile)
             if proxy:
                 _validate_proxy(proxy)
 

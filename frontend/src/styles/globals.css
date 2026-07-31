@@ -63,4 +63,7 @@
   .label {
     @apply block text-xs font-medium text-gray-400 mb-1;
   }
+  .code-block {
+    @apply font-mono text-xs bg-surface-2 border border-border rounded-md p-3 text-gray-300 whitespace-pre-wrap break-all;
+  }
 }

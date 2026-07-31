@@ -53,6 +53,7 @@ def init_db():
                 auto_launch BOOLEAN DEFAULT 0,
                 color_scheme TEXT,
                 notes TEXT,
+                proxy_credential_id TEXT,
                 user_data_dir TEXT NOT NULL,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
@@ -63,6 +64,18 @@ def init_db():
                 tag TEXT NOT NULL,
                 color TEXT,
                 PRIMARY KEY (profile_id, tag)
+            );
+
+            CREATE TABLE IF NOT EXISTS proxy_credentials (
+                id TEXT PRIMARY KEY,
+                name TEXT NOT NULL,
+                scheme TEXT NOT NULL DEFAULT 'socks5',
+                host TEXT NOT NULL,
+                port INTEGER NOT NULL DEFAULT 1080,
+                username TEXT NOT NULL DEFAULT '',
+                password TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
             );
         """)
         conn.commit()
@@ -77,6 +90,9 @@ def init_db():
             conn.commit()
         if "auto_launch" not in cols:
             conn.execute("ALTER TABLE profiles ADD COLUMN auto_launch BOOLEAN DEFAULT 0")
+            conn.commit()
+        if "proxy_credential_id" not in cols:
+            conn.execute("ALTER TABLE profiles ADD COLUMN proxy_credential_id TEXT")
             conn.commit()
 
 
@@ -102,8 +118,9 @@ def create_profile(
                 user_agent, screen_width, screen_height, gpu_vendor, gpu_renderer,
                 hardware_concurrency, humanize, human_preset, headless, geoip,
                 clipboard_sync, auto_launch, color_scheme, launch_args, notes,
+                proxy_credential_id,
                 user_data_dir, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 profile_id, name, seed,
                 fields.get("proxy"),
@@ -125,6 +142,7 @@ def create_profile(
                 fields.get("color_scheme"),
                 json.dumps(fields.get("launch_args") or []),
                 fields.get("notes"),
+                fields.get("proxy_credential_id"),
                 user_data_dir, now, now,
             ),
         )
@@ -188,6 +206,7 @@ def update_profile(profile_id: str, **fields: Any) -> dict[str, Any] | None:
         "user_agent", "screen_width", "screen_height", "gpu_vendor", "gpu_renderer",
         "hardware_concurrency", "humanize", "human_preset", "headless", "geoip",
         "clipboard_sync", "auto_launch", "color_scheme", "launch_args", "notes",
+        "proxy_credential_id",
     ):
         if col in fields:
             update_cols.append(f"{col} = ?")
@@ -222,3 +241,103 @@ def delete_profile(profile_id: str) -> bool:
         cursor = conn.execute("DELETE FROM profiles WHERE id = ?", (profile_id,))
         conn.commit()
         return cursor.rowcount > 0
+
+
+# ── Proxy Credentials ─────────────────────────────────────────────────────
+
+
+def create_proxy_credential(
+    name: str,
+    scheme: str = "socks5",
+    host: str = "",
+    port: int = 1080,
+    username: str = "",
+    password: str = "",
+) -> dict[str, Any]:
+    cred_id = str(uuid.uuid4())
+    now = _now()
+    with get_db() as conn:
+        conn.execute(
+            """INSERT INTO proxy_credentials (
+                id, name, scheme, host, port, username, password, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            (cred_id, name, scheme, host, port, username, password, now, now),
+        )
+        conn.commit()
+    return get_proxy_credential(cred_id)  # type: ignore[return-value]
+
+
+def get_proxy_credential(cred_id: str) -> dict[str, Any] | None:
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT * FROM proxy_credentials WHERE id = ?", (cred_id,)
+        ).fetchone()
+        if not row:
+            return None
+        return dict(row)
+
+
+def list_proxy_credentials() -> list[dict[str, Any]]:
+    with get_db() as conn:
+        rows = conn.execute(
+            "SELECT * FROM proxy_credentials ORDER BY created_at DESC"
+        ).fetchall()
+        return [dict(r) for r in rows]
+
+
+def update_proxy_credential(cred_id: str, **fields: Any) -> dict[str, Any] | None:
+    existing = get_proxy_credential(cred_id)
+    if not existing:
+        return None
+
+    update_cols = []
+    update_vals = []
+    for col in ("name", "scheme", "host", "port", "username", "password"):
+        if col in fields:
+            update_cols.append(f"{col} = ?")
+            update_vals.append(fields[col])
+
+    if update_cols:
+        update_cols.append("updated_at = ?")
+        update_vals.append(_now())
+        update_vals.append(cred_id)
+        with get_db() as conn:
+            conn.execute(
+                f"UPDATE proxy_credentials SET {', '.join(update_cols)} WHERE id = ?",
+                update_vals,
+            )
+            conn.commit()
+
+    return get_proxy_credential(cred_id)
+
+
+def delete_proxy_credential(cred_id: str) -> bool:
+    with get_db() as conn:
+        cursor = conn.execute(
+            "DELETE FROM proxy_credentials WHERE id = ?", (cred_id,)
+        )
+        conn.commit()
+        return cursor.rowcount > 0
+
+
+def count_profiles_using_credential(cred_id: str) -> int:
+    with get_db() as conn:
+        row = conn.execute(
+            "SELECT COUNT(*) as cnt FROM profiles WHERE proxy_credential_id = ?",
+            (cred_id,),
+        ).fetchone()
+        return row["cnt"] if row else 0
+
+
+def build_proxy_url_from_credential(cred: dict[str, Any]) -> str:
+    """Build a full proxy URL from a proxy credential dict."""
+    scheme = cred.get("scheme", "socks5")
+    host = cred.get("host", "")
+    port = cred.get("port", 1080)
+    username = cred.get("username", "")
+    password = cred.get("password", "")
+    if username and password:
+        return f"{scheme}://{username}:{password}@{host}:{port}"
+    elif username:
+        return f"{scheme}://{username}@{host}:{port}"
+    return f"{scheme}://{host}:{port}"

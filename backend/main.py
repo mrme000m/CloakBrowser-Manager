@@ -34,6 +34,9 @@ from .models import (
     ProfileResponse,
     ProfileStatusResponse,
     ProfileUpdate,
+    ProxyCredentialCreate,
+    ProxyCredentialResponse,
+    ProxyCredentialUpdate,
     StatusResponse,
     TagResponse,
 )
@@ -171,6 +174,66 @@ class AuthMiddleware:
         else:
             response = JSONResponse({"detail": "Unauthorized"}, status_code=401)
             await response(scope, receive, send)
+
+
+# ── Helpers ────────────────────────────────────────────────────────────────────
+
+
+def _resolve_proxy_credential(profile: dict) -> ProxyCredentialResponse | None:
+    """Resolve proxy_credential_id on a profile dict into a response model."""
+    cred_id = profile.get("proxy_credential_id")
+    if not cred_id:
+        return None
+    cred = db.get_proxy_credential(cred_id)
+    if not cred:
+        return None
+    has_pw = bool(cred.get("password"))
+    return ProxyCredentialResponse(
+        id=cred["id"],
+        name=cred["name"],
+        scheme=cred.get("scheme", "socks5"),
+        host=cred.get("host", ""),
+        port=cred.get("port", 1080),
+        username=cred.get("username", ""),
+        has_password=has_pw,
+        proxy_url=db.build_proxy_url_from_credential(cred),
+        created_at=cred["created_at"],
+        updated_at=cred["updated_at"],
+    )
+
+
+def _cdp_endpoint(profile_id: str, scope: Scope) -> str:
+    """Build the full WS CDP endpoint URL from the request's Host header."""
+    host = "localhost:8080"
+    for key, val in scope.get("headers", []):
+        if key == b"host":
+            host = val.decode("latin-1")
+            break
+    ws_scheme = "ws"
+    for key, val in scope.get("headers", []):
+        if key == b"x-forwarded-proto" and b"https" in val.lower():
+            ws_scheme = "wss"
+            break
+    return f"{ws_scheme}://{host}/api/profiles/{profile_id}/cdp"
+
+
+def _enrich_profile(profile: dict, scope: Scope) -> ProfileResponse:
+    """Add runtime fields (status, proxy_credential, cdp_endpoint) to a profile dict."""
+    profile_id = profile["id"]
+    status = browser_mgr.get_status(profile_id)
+    proxy_cred = _resolve_proxy_credential(profile)
+    profile_tags = profile.get("tags", [])
+    # Build kwargs dict without 'tags' to avoid duplicate kwarg
+    profile_fields = {k: v for k, v in profile.items() if k != "tags"}
+    return ProfileResponse(
+        **profile_fields,
+        status=status["status"],
+        vnc_ws_port=status["vnc_ws_port"],
+        cdp_url=status["cdp_url"],
+        cdp_endpoint=_cdp_endpoint(profile_id, scope),
+        proxy_credential=proxy_cred.model_dump() if proxy_cred else None,
+        tags=[TagResponse(**t) for t in profile_tags],
+    )
 
 
 # Singleton browser manager
@@ -436,21 +499,13 @@ async def auth_logout(request: Request, response: Response):
 
 
 @app.get("/api/profiles", response_model=list[ProfileResponse])
-async def list_profiles():
+async def list_profiles(request: Request):
     profiles = db.list_profiles()
-    result = []
-    for p in profiles:
-        status = browser_mgr.get_status(p["id"])
-        p["status"] = status["status"]
-        p["vnc_ws_port"] = status["vnc_ws_port"]
-        p["cdp_url"] = status["cdp_url"]
-        p["tags"] = [TagResponse(**t) for t in p.get("tags", [])]
-        result.append(ProfileResponse(**p))
-    return result
+    return [_enrich_profile(p, request.scope) for p in profiles]
 
 
 @app.post("/api/profiles", response_model=ProfileResponse, status_code=201)
-async def create_profile(req: ProfileCreate):
+async def create_profile(req: ProfileCreate, request: Request):
     data = req.model_dump()
     tags = data.pop("tags", None)
     if tags:
@@ -458,29 +513,19 @@ async def create_profile(req: ProfileCreate):
     else:
         data["tags"] = []
     profile = db.create_profile(**data)
-    status = browser_mgr.get_status(profile["id"])
-    profile["status"] = status["status"]
-    profile["vnc_ws_port"] = status["vnc_ws_port"]
-    profile["cdp_url"] = status["cdp_url"]
-    profile["tags"] = [TagResponse(**t) for t in profile.get("tags", [])]
-    return ProfileResponse(**profile)
+    return _enrich_profile(profile, request.scope)
 
 
 @app.get("/api/profiles/{profile_id}", response_model=ProfileResponse)
-async def get_profile(profile_id: str):
+async def get_profile(profile_id: str, request: Request):
     profile = db.get_profile(profile_id)
     if not profile:
         raise HTTPException(status_code=404, detail="Profile not found")
-    status = browser_mgr.get_status(profile_id)
-    profile["status"] = status["status"]
-    profile["vnc_ws_port"] = status["vnc_ws_port"]
-    profile["cdp_url"] = status["cdp_url"]
-    profile["tags"] = [TagResponse(**t) for t in profile.get("tags", [])]
-    return ProfileResponse(**profile)
+    return _enrich_profile(profile, request.scope)
 
 
 @app.put("/api/profiles/{profile_id}", response_model=ProfileResponse)
-async def update_profile(profile_id: str, req: ProfileUpdate):
+async def update_profile(profile_id: str, req: ProfileUpdate, request: Request):
     # Only pass fields that were explicitly set
     data = req.model_dump(exclude_unset=True)
     tags = data.pop("tags", None)
@@ -489,12 +534,7 @@ async def update_profile(profile_id: str, req: ProfileUpdate):
     profile = db.update_profile(profile_id, **data)
     if not profile:
         raise HTTPException(status_code=404, detail="Profile not found")
-    status = browser_mgr.get_status(profile_id)
-    profile["status"] = status["status"]
-    profile["vnc_ws_port"] = status["vnc_ws_port"]
-    profile["cdp_url"] = status["cdp_url"]
-    profile["tags"] = [TagResponse(**t) for t in profile.get("tags", [])]
-    return ProfileResponse(**profile)
+    return _enrich_profile(profile, request.scope)
 
 
 @app.delete("/api/profiles/{profile_id}")
@@ -523,7 +563,7 @@ async def delete_profile(profile_id: str):
 
 
 @app.post("/api/profiles/{profile_id}/launch", response_model=LaunchResponse)
-async def launch_profile(profile_id: str):
+async def launch_profile(profile_id: str, request: Request):
     profile = db.get_profile(profile_id)
     if not profile:
         raise HTTPException(status_code=404, detail="Profile not found")
@@ -544,6 +584,7 @@ async def launch_profile(profile_id: str):
         vnc_ws_port=running.ws_port,
         display=f":{running.display}",
         cdp_url=f"/api/profiles/{profile_id}/cdp",
+        cdp_endpoint=_cdp_endpoint(profile_id, request.scope),
     )
 
 
@@ -556,12 +597,15 @@ async def stop_profile(profile_id: str):
 
 
 @app.get("/api/profiles/{profile_id}/status", response_model=ProfileStatusResponse)
-async def get_profile_status(profile_id: str):
+async def get_profile_status(profile_id: str, request: Request):
     profile = db.get_profile(profile_id)
     if not profile:
         raise HTTPException(status_code=404, detail="Profile not found")
     status = browser_mgr.get_status(profile_id)
-    return ProfileStatusResponse(**status)
+    return ProfileStatusResponse(
+        **status,
+        cdp_endpoint=_cdp_endpoint(profile_id, request.scope),
+    )
 
 
 # ── System Status ─────────────────────────────────────────────────────────────
@@ -577,6 +621,99 @@ async def get_system_status():
         binary_version=CHROMIUM_VERSION,
         profiles_total=len(profiles),
     )
+
+
+# ── Proxy Credentials ──────────────────────────────────────────────────────────
+
+
+@app.get("/api/proxy-credentials", response_model=list[ProxyCredentialResponse])
+async def list_proxy_credentials():
+    creds = db.list_proxy_credentials()
+    return [
+        ProxyCredentialResponse(
+            id=c["id"],
+            name=c["name"],
+            scheme=c.get("scheme", "socks5"),
+            host=c.get("host", ""),
+            port=c.get("port", 1080),
+            username=c.get("username", ""),
+            has_password=bool(c.get("password")),
+            proxy_url=db.build_proxy_url_from_credential(c),
+            created_at=c["created_at"],
+            updated_at=c["updated_at"],
+        )
+        for c in creds
+    ]
+
+
+@app.post("/api/proxy-credentials", response_model=ProxyCredentialResponse, status_code=201)
+async def create_proxy_credential(req: ProxyCredentialCreate):
+    cred = db.create_proxy_credential(**req.model_dump())
+    return ProxyCredentialResponse(
+        id=cred["id"],
+        name=cred["name"],
+        scheme=cred.get("scheme", "socks5"),
+        host=cred.get("host", ""),
+        port=cred.get("port", 1080),
+        username=cred.get("username", ""),
+        has_password=bool(cred.get("password")),
+        proxy_url=db.build_proxy_url_from_credential(cred),
+        created_at=cred["created_at"],
+        updated_at=cred["updated_at"],
+    )
+
+
+@app.get("/api/proxy-credentials/{cred_id}", response_model=ProxyCredentialResponse)
+async def get_proxy_credential(cred_id: str):
+    cred = db.get_proxy_credential(cred_id)
+    if not cred:
+        raise HTTPException(status_code=404, detail="Proxy credential not found")
+    return ProxyCredentialResponse(
+        id=cred["id"],
+        name=cred["name"],
+        scheme=cred.get("scheme", "socks5"),
+        host=cred.get("host", ""),
+        port=cred.get("port", 1080),
+        username=cred.get("username", ""),
+        has_password=bool(cred.get("password")),
+        proxy_url=db.build_proxy_url_from_credential(cred),
+        created_at=cred["created_at"],
+        updated_at=cred["updated_at"],
+    )
+
+
+@app.put("/api/proxy-credentials/{cred_id}", response_model=ProxyCredentialResponse)
+async def update_proxy_credential(cred_id: str, req: ProxyCredentialUpdate):
+    data = req.model_dump(exclude_unset=True)
+    cred = db.update_proxy_credential(cred_id, **data)
+    if not cred:
+        raise HTTPException(status_code=404, detail="Proxy credential not found")
+    return ProxyCredentialResponse(
+        id=cred["id"],
+        name=cred["name"],
+        scheme=cred.get("scheme", "socks5"),
+        host=cred.get("host", ""),
+        port=cred.get("port", 1080),
+        username=cred.get("username", ""),
+        has_password=bool(cred.get("password")),
+        proxy_url=db.build_proxy_url_from_credential(cred),
+        created_at=cred["created_at"],
+        updated_at=cred["updated_at"],
+    )
+
+
+@app.delete("/api/proxy-credentials/{cred_id}")
+async def delete_proxy_credential(cred_id: str):
+    # Check if any profiles are using this credential
+    count = db.count_profiles_using_credential(cred_id)
+    if count > 0:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Cannot delete: {count} profile(s) are using this credential",
+        )
+    if not db.delete_proxy_credential(cred_id):
+        raise HTTPException(status_code=404, detail="Proxy credential not found")
+    return {"ok": True}
 
 
 # ── Clipboard Relay ──────────────────────────────────────────────────────────

@@ -1,6 +1,7 @@
 import { useState, useCallback, useEffect } from "react";
-import { Lock, PanelLeftClose, PanelLeft } from "lucide-react";
+import { Lock, PanelLeftClose, PanelLeft, Shield } from "lucide-react";
 import { useProfiles } from "./hooks/useProfiles";
+import { useProxyCredentials } from "./hooks/useProxyCredentials";
 import { api, setOnUnauthorized, type ProfileCreateData } from "./lib/api";
 import { ProfileList } from "./components/ProfileList";
 import { ProfileForm } from "./components/ProfileForm";
@@ -8,6 +9,7 @@ import { ProfileViewer } from "./components/ProfileViewer";
 import { LaunchButton } from "./components/LaunchButton";
 import { StatusIndicator } from "./components/StatusIndicator";
 import { LoginPage } from "./components/LoginPage";
+import { ProxyCredentialsManager } from "./components/ProxyCredentialsManager";
 
 type AuthState = "checking" | "required" | "ok" | "error";
 type View = "empty" | "create" | "edit" | "view";
@@ -90,9 +92,11 @@ interface AppContentProps {
 
 function AppContent({ authRequired, onLogout }: AppContentProps) {
   const { profiles, loading, error, create, update, remove, launch, stop } = useProfiles();
+  const { credentials: proxyCredentials } = useProxyCredentials();
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [view, setView] = useState<View>("empty");
   const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [proxyManagerOpen, setProxyManagerOpen] = useState(false);
 
   const selected = profiles.find((p) => p.id === selectedId) ?? null;
 
@@ -155,13 +159,24 @@ function AppContent({ authRequired, onLogout }: AppContentProps) {
     <div className="h-screen flex">
       {/* Sidebar */}
       {sidebarOpen && (
-        <div className="w-64 border-r border-border bg-surface-1 flex-shrink-0">
+        <div className="w-64 border-r border-border bg-surface-1 flex-shrink-0 flex flex-col">
           <ProfileList
             profiles={profiles}
             selectedId={selectedId}
             onSelect={handleSelect}
             onNew={handleNew}
           />
+          {/* Proxy credentials button */}
+          <div className="p-3 border-t border-border">
+            <button
+              onClick={() => setProxyManagerOpen(true)}
+              className="btn-secondary w-full flex items-center justify-center gap-1.5 text-xs"
+              title="Manage proxy credentials"
+            >
+              <Shield className="h-3 w-3" />
+              <span>Proxy Credentials</span>
+            </button>
+          </div>
         </div>
       )}
 
@@ -225,6 +240,7 @@ function AppContent({ authRequired, onLogout }: AppContentProps) {
           {view === "create" && (
             <ProfileForm
               profile={null}
+              proxyCredentials={proxyCredentials}
               onSave={handleCreate}
               onCancel={() => setView("empty")}
             />
@@ -233,6 +249,7 @@ function AppContent({ authRequired, onLogout }: AppContentProps) {
           {view === "edit" && selected && (
             <ProfileForm
               profile={selected}
+              proxyCredentials={proxyCredentials}
               onSave={handleUpdate}
               onDelete={handleDelete}
               onCancel={() => {
@@ -247,12 +264,19 @@ function AppContent({ authRequired, onLogout }: AppContentProps) {
               key={selected.id}
               profileId={selected.id}
               cdpUrl={selected.cdp_url}
+              cdpEndpoint={selected.cdp_endpoint}
               clipboardSync={selected.clipboard_sync}
               onDisconnect={handleVncDisconnect}
             />
           )}
         </div>
       </div>
+
+      {/* Proxy Credentials Manager Modal */}
+      <ProxyCredentialsManager
+        open={proxyManagerOpen}
+        onClose={() => setProxyManagerOpen(false)}
+      />
     </div>
   );
 }

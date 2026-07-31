@@ -7,6 +7,8 @@ export interface Profile {
   name: string;
   fingerprint_seed: number;
   proxy: string | null;
+  proxy_credential_id: string | null;
+  proxy_credential: ProxyCredential | null;
   timezone: string | null;
   locale: string | null;
   platform: string;
@@ -32,12 +34,27 @@ export interface Profile {
   status: "running" | "stopped";
   vnc_ws_port: number | null;
   cdp_url: string | null;
+  cdp_endpoint: string | null;
+}
+
+export interface ProxyCredential {
+  id: string;
+  name: string;
+  scheme: string;
+  host: string;
+  port: number;
+  username: string;
+  has_password: boolean;
+  proxy_url: string;
+  created_at: string;
+  updated_at: string;
 }
 
 export interface ProfileCreateData {
   name: string;
   fingerprint_seed?: number | null;
   proxy?: string | null;
+  proxy_credential_id?: string | null;
   timezone?: string | null;
   locale?: string | null;
   platform?: string;
@@ -59,12 +76,22 @@ export interface ProfileCreateData {
   tags?: { tag: string; color: string | null }[];
 }
 
+export interface ProxyCredentialData {
+  name: string;
+  scheme?: string;
+  host: string;
+  port?: number;
+  username?: string;
+  password?: string;
+}
+
 export interface LaunchResult {
   profile_id: string;
   status: string;
   vnc_ws_port: number;
   display: string;
   cdp_url: string | null;
+  cdp_endpoint: string | null;
 }
 
 export interface SystemStatus {
@@ -155,4 +182,24 @@ export const api = {
 
   getClipboard: (id: string) =>
     request<{ text: string }>(`/api/profiles/${id}/clipboard`),
+
+  // ── Proxy Credentials ──────────────────────────────────────────
+
+  listProxyCredentials: () =>
+    request<ProxyCredential[]>("/api/proxy-credentials"),
+
+  createProxyCredential: (data: ProxyCredentialData) =>
+    request<ProxyCredential>("/api/proxy-credentials", {
+      method: "POST",
+      body: JSON.stringify(data),
+    }),
+
+  updateProxyCredential: (id: string, data: Partial<ProxyCredentialData>) =>
+    request<ProxyCredential>(`/api/proxy-credentials/${id}`, {
+      method: "PUT",
+      body: JSON.stringify(data),
+    }),
+
+  deleteProxyCredential: (id: string) =>
+    request<{ ok: boolean }>(`/api/proxy-credentials/${id}`, { method: "DELETE" }),
 };

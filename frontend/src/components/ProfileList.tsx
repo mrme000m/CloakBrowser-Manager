@@ -1,4 +1,4 @@
-import { Plus, Search, Monitor } from "lucide-react";
+import { Plus, Search, Monitor, Check, Code2 } from "lucide-react";
 import { useState } from "react";
 import type { Profile } from "../lib/api";
 import { StatusIndicator } from "./StatusIndicator";
@@ -12,12 +12,23 @@ interface ProfileListProps {
 
 export function ProfileList({ profiles, selectedId, onSelect, onNew }: ProfileListProps) {
   const [search, setSearch] = useState("");
+  const [cdpCopiedId, setCdpCopiedId] = useState<string | null>(null);
 
   const filtered = profiles.filter((p) =>
     p.name.toLowerCase().includes(search.toLowerCase()),
   );
 
   const runningCount = profiles.filter((p) => p.status === "running").length;
+
+  const copyCdp = (e: React.MouseEvent, profile: Profile) => {
+    e.stopPropagation();
+    const url = profile.cdp_endpoint;
+    if (!url) return;
+    navigator.clipboard?.writeText(url).then(() => {
+      setCdpCopiedId(profile.id);
+      setTimeout(() => setCdpCopiedId(null), 2000);
+    });
+  };
 
   return (
     <div className="flex flex-col h-full">
@@ -64,14 +75,43 @@ export function ProfileList({ profiles, selectedId, onSelect, onNew }: ProfileLi
           >
             <div className="flex items-center gap-2">
               <StatusIndicator status={profile.status} />
-              <span className="text-sm font-medium truncate">{profile.name}</span>
+              <span className="text-sm font-medium truncate flex-1">{profile.name}</span>
+              {profile.cdp_endpoint && (
+                <button
+                  onClick={(e) => copyCdp(e, profile)}
+                  className={`p-0.5 rounded transition-colors ${
+                    cdpCopiedId === profile.id
+                      ? "text-emerald-400"
+                      : "text-gray-500 hover:text-accent"
+                  }`}
+                  title={
+                    cdpCopiedId === profile.id
+                      ? "Copied!"
+                      : `Copy CDP: ${profile.cdp_endpoint}`
+                  }
+                >
+                  {cdpCopiedId === profile.id ? (
+                    <Check className="h-3 w-3" />
+                  ) : (
+                    <Code2 className="h-3 w-3" />
+                  )}
+                </button>
+              )}
             </div>
             <div className="flex items-center gap-2 mt-1 ml-4">
               <span className="text-xs text-gray-500 capitalize">{profile.platform}</span>
-              {profile.proxy && (
+              {(profile.proxy || profile.proxy_credential) && (
                 <>
                   <span className="text-xs text-gray-600">·</span>
                   <span className="text-xs text-gray-500">Proxy</span>
+                </>
+              )}
+              {profile.cdp_endpoint && (
+                <>
+                  <span className="text-xs text-gray-600">·</span>
+                  <span className={`text-xs ${profile.status === "running" ? "text-emerald-500" : "text-gray-500"}`}>
+                    CDP {profile.status === "running" ? "ready" : ""}
+                  </span>
                 </>
               )}
             </div>
