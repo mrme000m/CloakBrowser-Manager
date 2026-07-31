@@ -9,7 +9,7 @@ import logging
 import os
 import socket
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -211,6 +211,31 @@ BASE_CDP_PORT = 5100
 CDP_PORT_RANGE = 100  # cycle through 5100-5199 to avoid TIME_WAIT collisions
 
 
+def _discover_chrome_pid(cdp_port: int) -> int | None:
+    """Find the Chromium process PID owning a given --remote-debugging-port.
+
+    Uses psutil's process_iter to match the cmdline flag (robust: no reliance
+    on Playwright private APIs). Returns None if psutil is unavailable or no
+    matching process is found.
+    """
+    try:
+        import psutil
+    except Exception:
+        return None
+    needle = f"--remote-debugging-port={cdp_port}"
+    try:
+        for proc in psutil.process_iter(["pid", "cmdline"]):
+            try:
+                cmdline = proc.info.get("cmdline") or []
+                if any(needle in (arg or "") for arg in cmdline):
+                    return int(proc.info["pid"])
+            except Exception:
+                continue
+    except Exception:
+        return None
+    return None
+
+
 @dataclass
 class RunningProfile:
     profile_id: str
@@ -222,6 +247,9 @@ class RunningProfile:
     exit_ip: str | None = None
     effective_timezone: str | None = None
     effective_locale: str | None = None
+    # Resource-usage bookkeeping (best-effort, via psutil)
+    started_at: float = field(default_factory=time.time)
+    chrome_pid: int | None = None
 
 
 class BrowserManager:
@@ -362,6 +390,9 @@ class BrowserManager:
 
             # Best-effort GeoIP detection from the (proxied) browser — non-blocking.
             asyncio.create_task(self._detect_geoip(profile_id, running))
+            # Best-effort: discover the Chromium PID and warm up cpu_percent()
+            # so the first resource poll returns a meaningful (non-zero) value.
+            asyncio.create_task(self._warmup_resources(running))
 
             return running
 
@@ -423,6 +454,7 @@ class BrowserManager:
                 "exit_ip": running.exit_ip,
                 "effective_timezone": running.effective_timezone,
                 "effective_locale": running.effective_locale,
+                "resources": self.get_resources(profile_id),
             }
         return {
             "status": "stopped",
@@ -432,7 +464,100 @@ class BrowserManager:
             "exit_ip": None,
             "effective_timezone": None,
             "effective_locale": None,
+            "resources": None,
         }
+
+    def get_resources(self, profile_id: str) -> dict[str, Any] | None:
+        """Best-effort per-profile resource usage (CPU%/mem/uptime/proc count).
+
+        Returns None when the profile isn't running, psutil is unavailable, or
+        the Chromium PID can't be resolved. CPU% is summed over the browser
+        process and its recursive children (renderer/GPU subprocesses).
+        """
+        running = self.running.get(profile_id)
+        if not running:
+            return None
+        try:
+            import psutil
+        except Exception:
+            return None
+
+        # Resolve a live Chromium PID (cache on RunningProfile; re-discover on death).
+        pid = running.chrome_pid
+        try:
+            if pid is not None and not psutil.pid_exists(pid):
+                pid = None
+            if pid is None:
+                pid = _discover_chrome_pid(running.cdp_port)
+                running.chrome_pid = pid
+        except Exception:
+            pid = running.chrome_pid
+        if pid is None:
+            return None
+
+        try:
+            procs = [psutil.Process(pid)]
+            procs.extend(procs[0].children(recursive=True))
+            procs = [p for p in procs if p.is_running()]
+            cpu = 0.0
+            rss = 0
+            for p in procs:
+                try:
+                    cpu += p.cpu_percent(interval=None)
+                except Exception:
+                    pass
+                try:
+                    rss += p.memory_info().rss
+                except Exception:
+                    pass
+            return {
+                "cpu_percent": round(cpu, 1),
+                "mem_mb": round(rss / (1024 * 1024), 1),
+                "uptime_s": round(time.time() - running.started_at, 0),
+                "proc_count": len(procs),
+            }
+        except Exception as exc:
+            logger.debug("get_resources failed for %s: %s", profile_id, exc)
+            return None
+
+    def aggregate_resources(self) -> dict[str, Any]:
+        """Sum resource usage across all running profiles (for /api/status)."""
+        total_cpu = 0.0
+        total_mem = 0.0
+        total_procs = 0
+        for pid in self.running:
+            r = self.get_resources(pid)
+            if not r:
+                continue
+            if r.get("cpu_percent") is not None:
+                total_cpu += r["cpu_percent"]
+            if r.get("mem_mb") is not None:
+                total_mem += r["mem_mb"]
+            if r.get("proc_count") is not None:
+                total_procs += r["proc_count"]
+        return {
+            "cpu_percent": round(total_cpu, 1),
+            "mem_mb": round(total_mem, 1),
+            "proc_count": total_procs,
+        }
+
+    async def _warmup_resources(self, running: RunningProfile) -> None:
+        """Discover the Chromium PID and prime cpu_percent() after launch."""
+        try:
+            import psutil
+        except Exception:
+            return
+        pid = _discover_chrome_pid(running.cdp_port)
+        if not pid:
+            return
+        running.chrome_pid = pid
+        try:
+            parent = psutil.Process(pid)
+            parent.cpu_percent(interval=None)
+            for child in parent.children(recursive=True):
+                child.cpu_percent(interval=None)
+        except Exception:
+            pass
 
     async def _maybe_schedule_restart(self, profile_id: str) -> None:
         """Schedule an auto-restart for a crashed profile (Section 3c)."""

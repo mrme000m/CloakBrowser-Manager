@@ -1,0 +1,39 @@
+{
+  "name": "cbpm",
+  "version": "0.1.0",
+  "description": "CloakBrowser Profile Manager — self-explaining CLI for profile creation and management",
+  "type": "module",
+  "bin": {
+    "cbpm": "dist/index.js"
+  },
+  "main": "dist/index.js",
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "postbuild": "node -e \"require('fs').chmodSync('dist/index.js',0o755)\"",
+    "test": "tsx --test test/*.test.ts",
+    "prepublishOnly": "npm run build"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "keywords": [
+    "cloakbrowser",
+    "browser",
+    "automation",
+    "cdp",
+    "proxy",
+    "cli"
+  ],
+  "license": "SEE LICENSE IN ../LICENSE",
+  "dependencies": {
+    "commander": "^14.0.2"
+  },
+  "devDependencies": {
+    "tsx": "^4.19.2",
+    "typescript": "^5.6.3",
+    "@types/node": "^22.0.0"
+  }
+}

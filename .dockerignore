@@ -1,0 +1,39 @@
+# Keep the build context lean and avoid baking stale artifacts / secrets.
+# The Dockerfile only needs: frontend/{package.json,package-lock.json,src,...} (Stage 1 builds its own dist)
+# and backend/{requirements.txt,*.py,tests/}. Everything else below is unused or should not ship.
+
+# Version control
+.git
+.gitignore
+
+# Node deps (Stage 1 runs its own `npm install`; local node_modules are not needed)
+**/node_modules
+
+# The cbpm CLI lives in cli/ and is not part of the manager image
+cli/
+
+# Local build outputs (Stage 1 produces its own dist; backend has no build step)
+frontend/dist
+**/__pycache__
+**/*.pyc
+**/*.pyo
+
+# Python virtualenvs / test scaffolding
+**/.venv
+**/.venv-test
+.venv*
+**/.pytest_cache
+**/.mypy_cache
+**/.ruff_cache
+
+# Secrets / env (defensive — only .env.example exists, but never bake real env)
+.env
+.env.*
+!.env.example
+
+# Editor / OS cruft
+.DS_Store
+*.log
+.vscode
+.idea
+.zcode

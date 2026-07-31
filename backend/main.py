@@ -371,6 +371,7 @@ def _enrich_profile(profile: dict, scope: Scope) -> ProfileResponse:
         proxy_credential=proxy_cred.model_dump() if proxy_cred else None,
         proxy_group=proxy_group.model_dump() if proxy_group else None,
         tags=[TagResponse(**t) for t in profile_tags],
+        resources=status.get("resources"),
     )
 
 
@@ -867,11 +868,15 @@ async def get_system_status():
     from cloakbrowser.config import CHROMIUM_VERSION
 
     profiles = db.list_profiles()
+    agg = browser_mgr.aggregate_resources() if browser_mgr.running else None
     return StatusResponse(
         running_count=len(browser_mgr.running),
         binary_version=CHROMIUM_VERSION,
         profiles_total=len(profiles),
         max_running=MAX_RUNNING_PROFILES or None,
+        total_cpu_percent=agg["cpu_percent"] if agg else None,
+        total_mem_mb=agg["mem_mb"] if agg else None,
+        total_proc_count=agg["proc_count"] if agg else None,
     )
 
 

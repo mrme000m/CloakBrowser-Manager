@@ -104,10 +104,11 @@ def test_get_status_stopped():
         "exit_ip": None,
         "effective_timezone": None,
         "effective_locale": None,
+        "resources": None,
     }
 
 
-def test_get_status_running():
+def test_get_status_running(monkeypatch):
     from backend.browser_manager import BrowserManager, RunningProfile
     from unittest.mock import MagicMock
     mgr = BrowserManager()
@@ -118,6 +119,9 @@ def test_get_status_running():
         ws_port=6100,
         cdp_port=5100,
     )
+    # Avoid real psutil host scanning in this unit test; get_status folds in the
+    # resources dict returned by get_resources (None here = not yet measured).
+    monkeypatch.setattr(mgr, "get_resources", lambda _pid: None)
     status = mgr.get_status("abc")
     assert status == {
         "status": "running",
@@ -127,4 +131,5 @@ def test_get_status_running():
         "exit_ip": None,
         "effective_timezone": None,
         "effective_locale": None,
+        "resources": None,
     }

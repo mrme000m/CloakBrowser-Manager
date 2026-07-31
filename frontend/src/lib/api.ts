@@ -117,6 +117,7 @@ export interface Profile {
   vnc_ws_port: number | null;
   cdp_url: string | null;
   cdp_endpoint: string | null;
+  resources: ProfileResources | null;
 }
 
 export interface ProfileCreateData {
@@ -185,6 +186,14 @@ export interface LaunchResult {
   cdp_endpoint: string | null;
 }
 
+/** Per-profile resource usage for a running browser (best-effort, via psutil). */
+export interface ProfileResources {
+  cpu_percent: number | null;
+  mem_mb: number | null;
+  uptime_s: number | null;
+  proc_count: number | null;
+}
+
 /** GET /api/profiles/{id}/status — per-profile runtime info (geoip, cdp clients). */
 export interface ProfileStatus {
   status: string;
@@ -196,6 +205,7 @@ export interface ProfileStatus {
   exit_ip: string | null;
   effective_timezone: string | null;
   effective_locale: string | null;
+  resources: ProfileResources | null;
 }
 
 export interface SystemStatus {
@@ -203,6 +213,9 @@ export interface SystemStatus {
   binary_version: string;
   profiles_total: number;
   max_running: number | null;
+  total_cpu_percent: number | null;
+  total_mem_mb: number | null;
+  total_proc_count: number | null;
 }
 
 export interface BulkResultItem {

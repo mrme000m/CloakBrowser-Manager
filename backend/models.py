@@ -265,6 +265,7 @@ class ProfileResponse(BaseModel):
     vnc_ws_port: int | None = None
     cdp_url: str | None = None
     cdp_endpoint: str | None = None  # full ws://host:port/api/profiles/{id}/cdp
+    resources: ProfileResources | None = None
 
 
 class LaunchResponse(BaseModel):
@@ -281,6 +282,21 @@ class StatusResponse(BaseModel):
     binary_version: str
     profiles_total: int
     max_running: int | None = None
+    # Aggregate resource usage across running profiles (None when none running)
+    total_cpu_percent: float | None = None
+    total_mem_mb: float | None = None
+    total_proc_count: int | None = None
+
+
+# ── Resources ───────────────────────────────────────────────────────────────
+
+
+class ProfileResources(BaseModel):
+    """Per-profile resource usage for a running browser (best-effort, via psutil)."""
+    cpu_percent: float | None = None
+    mem_mb: float | None = None
+    uptime_s: float | None = None
+    proc_count: int | None = None
 
 
 class ProfileStatusResponse(BaseModel):
@@ -293,6 +309,7 @@ class ProfileStatusResponse(BaseModel):
     exit_ip: str | None = None
     effective_timezone: str | None = None
     effective_locale: str | None = None
+    resources: ProfileResources | None = None
 
 
 # ── Clone / Bulk ────────────────────────────────────────────────────────────

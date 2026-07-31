@@ -104,13 +104,19 @@ function AppContent({ authRequired, onLogout }: AppContentProps) {
   const [proxyProviderManagerOpen, setProxyProviderManagerOpen] = useState(false);
   const [proxyGroupManagerOpen, setProxyGroupManagerOpen] = useState(false);
   const [maxRunning, setMaxRunning] = useState<number | null>(null);
+  const [agg, setAgg] = useState<{ cpu: number | null; mem: number | null }>({ cpu: null, mem: null });
 
   const selected = profiles.find((p) => p.id === selectedId) ?? null;
 
-  // Poll system status for the running-cap (MAX_RUNNING_PROFILES), if configured.
+  // Poll system status: running-cap (MAX_RUNNING_PROFILES) + aggregate resource use.
   useEffect(() => {
     let active = true;
-    const poll = () => api.getStatus().then((s) => { if (active) setMaxRunning(s.max_running ?? null); }).catch(() => {});
+    const poll = () =>
+      api.getStatus().then((s) => {
+        if (!active) return;
+        setMaxRunning(s.max_running ?? null);
+        setAgg({ cpu: s.total_cpu_percent ?? null, mem: s.total_mem_mb ?? null });
+      }).catch(() => {});
     poll();
     const interval = setInterval(poll, 5000);
     return () => { active = false; clearInterval(interval); };
@@ -268,6 +274,11 @@ function AppContent({ authRequired, onLogout }: AppContentProps) {
             {maxRunning !== null && (
               <span className="text-xs text-gray-500" title="Running profiles / max allowed">
                 {profiles.filter((p) => p.status === "running").length}/{maxRunning}
+              </span>
+            )}
+            {agg.cpu != null && agg.mem != null && (
+              <span className="text-xs text-gray-500 font-mono" title="Aggregate CPU · memory across running profiles">
+                CPU {agg.cpu.toFixed(0)}% · {agg.mem.toFixed(0)}MB
               </span>
             )}
             {selected && (

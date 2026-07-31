@@ -1,6 +1,20 @@
 import { useEffect, useRef, useState } from "react";
 import { ClipboardCopy, Code2, Maximize2, Minimize2, Copy, Check, ChevronDown } from "lucide-react";
-import { api } from "../lib/api";
+import { api, type ProfileResources } from "../lib/api";
+
+/** Compact "1d 2h 3m" / "3m 12s" formatter for uptime seconds. */
+function formatUptime(s: number | null | undefined): string | null {
+  if (s == null) return null;
+  const sec = Math.floor(s);
+  const d = Math.floor(sec / 86400);
+  const h = Math.floor((sec % 86400) / 3600);
+  const m = Math.floor((sec % 3600) / 60);
+  const ss = sec % 60;
+  if (d > 0) return `${d}d ${h}h ${m}m`;
+  if (h > 0) return `${h}h ${m}m`;
+  if (m > 0) return `${m}m ${ss}s`;
+  return `${ss}s`;
+}
 
 interface ProfileViewerProps {
   profileId: string;
@@ -26,6 +40,8 @@ export function ProfileViewer({ profileId, cdpUrl, cdpEndpoint, clipboardSync: i
   // Runtime status: geoip + active CDP client count (polled while connected)
   const [geoip, setGeoip] = useState<{ exit_ip: string | null; tz: string | null; locale: string | null }>({ exit_ip: null, tz: null, locale: null });
   const [cdpClients, setCdpClients] = useState(0);
+  // Per-profile resource usage (CPU% / mem / uptime), polled while connected.
+  const [resources, setResources] = useState<ProfileResources | null>(null);
 
   // Resolve CDP endpoint
   const cdpWsUrl = cdpEndpoint || (cdpUrl ? `${window.location.protocol === "https:" ? "wss:" : "ws:"}//${window.location.host}${cdpUrl}` : null);
@@ -98,6 +114,7 @@ export function ProfileViewer({ profileId, cdpUrl, cdpEndpoint, clipboardSync: i
     if (!connected) {
       setGeoip({ exit_ip: null, tz: null, locale: null });
       setCdpClients(0);
+      setResources(null);
       return;
     }
     let cancelled = false;
@@ -107,6 +124,7 @@ export function ProfileViewer({ profileId, cdpUrl, cdpEndpoint, clipboardSync: i
         if (!cancelled) {
           setGeoip({ exit_ip: s.exit_ip, tz: s.effective_timezone, locale: s.effective_locale });
           setCdpClients(s.cdp_clients ?? 0);
+          setResources(s.resources ?? null);
         }
       } catch {
         // non-fatal; status is best-effort
@@ -280,6 +298,14 @@ const browser = await chromium.connectOverCDP("${cdpWsUrl}"${headersArg ? `{${he
           {connected && (geoip.exit_ip || geoip.tz) && (
             <span className="text-xs text-gray-500 font-mono truncate max-w-[40vw]" title="Exit IP · timezone · locale (GeoIP)">
               {geoip.exit_ip ?? "—"} · {geoip.tz ?? "—"} · {geoip.locale ?? "—"}
+            </span>
+          )}
+          {connected && resources && (resources.cpu_percent != null || resources.mem_mb != null) && (
+            <span
+              className="text-xs text-gray-500 font-mono truncate max-w-[30vw]"
+              title={`CPU ${resources.cpu_percent ?? "—"}% · ${(resources.mem_mb ?? 0).toFixed(0)} MB · up ${formatUptime(resources.uptime_s) ?? "—"} · ${resources.proc_count ?? "—"} proc`}
+            >
+              <span className="text-gray-600">·</span> CPU {resources.cpu_percent ?? "—"}% · {(resources.mem_mb ?? 0).toFixed(0)}MB · {formatUptime(resources.uptime_s) ?? "—"}
             </span>
           )}
         </div>

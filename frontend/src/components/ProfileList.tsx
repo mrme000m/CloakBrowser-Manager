@@ -3,6 +3,20 @@ import { useMemo, useState } from "react";
 import type { Profile } from "../lib/api";
 import { StatusIndicator } from "./StatusIndicator";
 
+/** Compact "1d 2h 3m" / "3m 12s" formatter for uptime seconds. */
+function formatUptime(s: number | null | undefined): string | null {
+  if (s == null) return null;
+  const sec = Math.floor(s);
+  const d = Math.floor(sec / 86400);
+  const h = Math.floor((sec % 86400) / 3600);
+  const m = Math.floor((sec % 3600) / 60);
+  const ss = sec % 60;
+  if (d > 0) return `${d}d ${h}h ${m}m`;
+  if (h > 0) return `${h}h ${m}m`;
+  if (m > 0) return `${m}m ${ss}s`;
+  return `${ss}s`;
+}
+
 interface ProfileListProps {
   profiles: Profile[];
   selectedId: string | null;
@@ -246,6 +260,17 @@ export function ProfileList({
                   <span className="text-xs text-gray-600">·</span>
                   <span className={`text-xs ${profile.status === "running" ? "text-emerald-500" : "text-gray-500"}`}>
                     CDP {profile.status === "running" ? "ready" : ""}
+                  </span>
+                </>
+              )}
+              {profile.status === "running" && profile.resources && (profile.resources.cpu_percent != null || profile.resources.mem_mb != null) && (
+                <>
+                  <span className="text-xs text-gray-600">·</span>
+                  <span
+                    className="text-xs text-gray-500 font-mono"
+                    title={`CPU ${profile.resources.cpu_percent ?? "—"}% · ${(profile.resources.mem_mb ?? 0).toFixed(0)} MB RSS · up ${formatUptime(profile.resources.uptime_s) ?? "—"} · ${profile.resources.proc_count ?? "—"} proc`}
+                  >
+                    CPU {profile.resources.cpu_percent ?? "—"}% · {(profile.resources.mem_mb ?? 0).toFixed(0)}MB
                   </span>
                 </>
               )}
