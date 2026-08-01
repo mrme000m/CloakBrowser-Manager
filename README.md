@@ -58,6 +58,7 @@ Each CloakBrowser profile generates a completely different device identity. To t
 
 - **Profile management** — create, edit, delete browser profiles with unique fingerprints
 - **Per-profile settings** — fingerprint seed, proxy, timezone, locale, user agent, screen size, platform
+- **Identity rotation API** — reseed fingerprint, reset User-Agent, and swap proxy/timezone via REST endpoints
 - **One-click launch/stop** — each profile runs as an isolated CloakBrowser instance
 - **Session persistence** — cookies, localStorage, and cache survive browser restarts
 - **In-browser viewing** — interact with launched browsers via noVNC, directly in the web GUI

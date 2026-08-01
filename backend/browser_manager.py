@@ -415,8 +415,10 @@ class BrowserManager:
         if running:
             logger.info("Browser closed for profile %s, cleaning up", profile_id)
             await self.vnc.stop_vnc(running.display)
-
-        await self._maybe_schedule_restart(profile_id)
+            # Only an unexpected close should schedule a restart. A manual
+            # stop() pops \ first, so this guard keeps stop from
+            # racing the caller's next launch with an auto-restart.
+            await self._maybe_schedule_restart(profile_id)
 
     async def stop(self, profile_id: str):
         """Stop a running browser instance and cancel any pending auto-restart."""

@@ -81,6 +81,37 @@ def test_update_profile_not_found(app_client: TestClient):
     assert resp.status_code == 404
 
 
+def test_reseed_profile(app_client: TestClient):
+    create = app_client.post("/api/profiles", json={"name": "Reseed Me", "fingerprint_seed": 12345})
+    pid = create.json()["id"]
+    resp = app_client.post(f"/api/profiles/{pid}/reseed")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["fingerprint_seed"] != 12345
+    assert 10000 <= data["fingerprint_seed"] <= 99999
+
+
+def test_reseed_profile_not_found(app_client: TestClient):
+    resp = app_client.post("/api/profiles/nonexistent/reseed")
+    assert resp.status_code == 404
+
+
+def test_reset_ua(app_client: TestClient):
+    create = app_client.post(
+        "/api/profiles",
+        json={"name": "Reset UA", "user_agent": "Mozilla/5.0 custom"},
+    )
+    pid = create.json()["id"]
+    resp = app_client.post(f"/api/profiles/{pid}/reset-ua")
+    assert resp.status_code == 200
+    assert resp.json()["user_agent"] is None
+
+
+def test_reset_ua_not_found(app_client: TestClient):
+    resp = app_client.post("/api/profiles/nonexistent/reset-ua")
+    assert resp.status_code == 404
+
+
 def test_delete_profile(app_client: TestClient):
     create = app_client.post("/api/profiles", json={"name": "Delete Me"})
     pid = create.json()["id"]

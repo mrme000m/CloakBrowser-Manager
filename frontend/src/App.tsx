@@ -1,5 +1,5 @@
 import { useState, useCallback, useEffect } from "react";
-import { Lock, PanelLeftClose, PanelLeft, Shield, Server, Shuffle } from "lucide-react";
+import { Lock, PanelLeftClose, PanelLeft, Monitor, Plus, Shield, Server, Shuffle } from "lucide-react";
 import { useProfiles } from "./hooks/useProfiles";
 import { useProxyCredentials } from "./hooks/useProxyCredentials";
 import { useProxyGroups } from "./hooks/useProxyGroups";
@@ -16,6 +16,15 @@ import { ProxyGroupsManager } from "./components/ProxyGroupsManager";
 
 type AuthState = "checking" | "required" | "ok" | "error";
 type View = "empty" | "create" | "edit" | "view";
+
+function FullScreenLoader({ label = "Loading…" }: { label?: string }) {
+  return (
+    <div className="h-screen flex flex-col items-center justify-center gap-3 bg-surface-0">
+      <div className="spinner spinner-lg" role="status" aria-label={label} />
+      <span className="text-gray-500 text-xs">{label}</span>
+    </div>
+  );
+}
 
 export default function App() {
   const [authState, setAuthState] = useState<AuthState>("checking");
@@ -41,19 +50,17 @@ export default function App() {
     return () => setOnUnauthorized(null);
   }, []);
 
-  if (authState === "checking") {
-    return (
-      <div className="h-screen flex items-center justify-center">
-        <div className="text-gray-500 text-sm">Loading...</div>
-      </div>
-    );
-  }
+  if (authState === "checking") return <FullScreenLoader label="Connecting…" />;
 
   if (authState === "error") {
     return (
       <div className="h-screen flex items-center justify-center bg-surface-0">
-        <div className="text-center">
-          <p className="text-red-400 text-sm mb-2">Unable to reach the server</p>
+        <div className="text-center max-w-sm px-4">
+          <div className="mx-auto mb-3 h-10 w-10 rounded-lg bg-red-500/10 flex items-center justify-center">
+            <Monitor className="h-5 w-5 text-red-400" />
+          </div>
+          <p className="text-red-400 text-sm mb-1">Unable to reach the server</p>
+          <p className="text-gray-500 text-xs mb-4">The manager backend isn't responding.</p>
           <button
             onClick={() => {
               setAuthState("checking");
@@ -64,7 +71,7 @@ export default function App() {
                 })
                 .catch(() => setAuthState("error"));
             }}
-            className="text-xs text-gray-400 hover:text-gray-200 underline"
+            className="btn-secondary text-xs"
           >
             Retry
           </button>
@@ -194,19 +201,15 @@ function AppContent({ authRequired, onLogout }: AppContentProps) {
     setView("edit");
   }, []);
 
-  if (loading) {
-    return (
-      <div className="h-screen flex items-center justify-center">
-        <div className="text-gray-500 text-sm">Loading...</div>
-      </div>
-    );
-  }
+  if (loading) return <FullScreenLoader label="Loading profiles…" />;
+
+  const runningCount = profiles.filter((p) => p.status === "running").length;
 
   return (
-    <div className="h-screen flex">
+    <div className="h-screen flex bg-surface-0 text-gray-100">
       {/* Sidebar */}
       {sidebarOpen && (
-        <div className="w-64 border-r border-border bg-surface-1 flex-shrink-0 flex flex-col">
+        <aside className="w-72 border-r border-border bg-surface-1 flex-shrink-0 flex flex-col min-h-0">
           <ProfileList
             profiles={profiles}
             selectedId={selectedId}
@@ -219,100 +222,125 @@ function AppContent({ authRequired, onLogout }: AppContentProps) {
             maxRunning={maxRunning}
           />
           {/* Proxy management buttons */}
-          <div className="p-3 border-t border-border space-y-2">
+          <div className="px-5 py-3 border-t border-border space-y-2 flex-shrink-0">
             <button
               onClick={() => setProxyManagerOpen(true)}
               className="btn-secondary w-full flex items-center justify-center gap-1.5 text-xs"
-              title="Manage proxy credentials"
             >
-              <Shield className="h-3 w-3" />
+              <Shield className="h-3.5 w-3.5" />
               <span>Proxy Credentials</span>
             </button>
-            <div className="flex gap-2">
+            <div className="grid grid-cols-2 gap-2">
               <button
                 onClick={() => setProxyProviderManagerOpen(true)}
-                className="btn-secondary flex-1 flex items-center justify-center gap-1.5 text-xs"
-                title="Manage proxy providers (IPVanish, ...)"
+                className="btn-secondary flex items-center justify-center gap-1.5 text-xs"
+                title="Manage proxy providers (IPVanish, …)"
               >
-                <Server className="h-3 w-3" />
+                <Server className="h-3.5 w-3.5" />
                 <span>Providers</span>
               </button>
               <button
                 onClick={() => setProxyGroupManagerOpen(true)}
-                className="btn-secondary flex-1 flex items-center justify-center gap-1.5 text-xs"
+                className="btn-secondary flex items-center justify-center gap-1.5 text-xs"
                 title="Manage proxy rotation groups"
               >
-                <Shuffle className="h-3 w-3" />
+                <Shuffle className="h-3.5 w-3.5" />
                 <span>Groups</span>
               </button>
             </div>
           </div>
-        </div>
+        </aside>
       )}
 
       {/* Main panel */}
-      <div className="flex-1 flex flex-col min-w-0">
+      <div className="flex-1 flex flex-col min-w-0 min-h-0">
         {/* Top bar */}
-        <div className="flex items-center justify-between px-4 py-2 border-b border-border bg-surface-1">
-          <div className="flex items-center gap-3">
+        <header className="flex items-center justify-between px-4 py-2.5 border-b border-border bg-surface-1">
+          <div className="flex items-center gap-3 min-w-0">
             <button
               onClick={() => setSidebarOpen(!sidebarOpen)}
-              className="text-gray-500 hover:text-gray-300 p-1"
-              title={sidebarOpen ? "Hide sidebar" : "Show sidebar"}
+              className="icon-btn"
+              aria-label={sidebarOpen ? "Hide sidebar" : "Show sidebar"}
+              aria-expanded={sidebarOpen}
             >
               {sidebarOpen ? <PanelLeftClose className="h-4 w-4" /> : <PanelLeft className="h-4 w-4" />}
             </button>
+
+            {!sidebarOpen && (
+              <div className="flex items-center gap-1.5 pr-2 mr-1 border-r border-border">
+                <Monitor className="h-4 w-4 text-accent" />
+                <span className="text-sm font-semibold tracking-tight whitespace-nowrap">CloakBrowser Manager</span>
+              </div>
+            )}
+
             {selected && (
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-2 min-w-0">
                 <StatusIndicator status={selected.status} size="md" />
-                <span className="text-sm font-medium">{selected.name}</span>
-                <span className="text-xs text-gray-500 capitalize">{selected.platform}</span>
+                <span className="text-sm font-medium truncate">{selected.name}</span>
+                <span className="text-xs text-gray-500 capitalize flex-shrink-0">{selected.platform}</span>
               </div>
             )}
           </div>
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2.5 flex-shrink-0">
             {maxRunning !== null && (
-              <span className="text-xs text-gray-500" title="Running profiles / max allowed">
-                {profiles.filter((p) => p.status === "running").length}/{maxRunning}
+              <span
+                className="text-xs text-gray-400 tabular-nums"
+                title="Running profiles / max allowed"
+              >
+                {runningCount}<span className="text-gray-600">/</span>{maxRunning}
               </span>
             )}
             {agg.cpu != null && agg.mem != null && (
-              <span className="text-xs text-gray-500 font-mono" title="Aggregate CPU · memory across running profiles">
+              <span className="text-xs text-gray-400 font-mono tabular-nums hidden sm:inline" title="Aggregate CPU · memory across running profiles">
                 CPU {agg.cpu.toFixed(0)}% · {agg.mem.toFixed(0)}MB
               </span>
             )}
             {selected && (
-              <LaunchButton
-                status={selected.status}
-                onLaunch={handleLaunch}
-                onStop={handleStop}
-              />
+              <>
+                <span className="h-5 w-px bg-border" aria-hidden="true" />
+                <LaunchButton
+                  status={selected.status}
+                  onLaunch={handleLaunch}
+                  onStop={handleStop}
+                />
+              </>
             )}
             {authRequired && (
               <button
                 onClick={onLogout}
-                className="text-gray-500 hover:text-gray-300 p-1"
+                className="icon-btn"
+                aria-label="Log out"
                 title="Log out"
               >
                 <Lock className="h-3.5 w-3.5" />
               </button>
             )}
           </div>
-        </div>
+        </header>
 
         {/* Error banner */}
         {error && (
-          <div className="px-4 py-2 bg-red-600/15 border-b border-red-600/30 text-red-400 text-sm">
+          <div role="alert" className="px-4 py-2 bg-red-600/15 border-b border-red-600/30 text-red-400 text-sm">
             {error}
           </div>
         )}
 
         {/* Content */}
-        <div className="flex-1 overflow-y-auto overscroll-contain">
+        <div className="flex-1 overflow-y-auto overscroll-contain min-h-0">
           {view === "empty" && (
-            <div className="flex items-center justify-center h-full">
-              <div className="text-center">
-                <p className="text-gray-500 text-sm">Select a profile or create a new one</p>
+            <div className="flex items-center justify-center h-full px-4 py-16">
+              <div className="text-center max-w-sm">
+                <div className="mx-auto mb-5 h-12 w-12 rounded-xl bg-surface-2 border border-border flex items-center justify-center">
+                  <Monitor className="h-6 w-6 text-gray-500" />
+                </div>
+                <p className="text-gray-300 text-sm font-medium mb-1">No profile selected</p>
+                <p className="text-gray-500 text-xs mb-5">
+                  Select a profile from the sidebar, or create a new one to get started.
+                </p>
+                <button onClick={handleNew} className="btn-primary inline-flex items-center gap-1.5">
+                  <Plus className="h-3.5 w-3.5" />
+                  <span>New Profile</span>
+                </button>
               </div>
             </div>
           )}

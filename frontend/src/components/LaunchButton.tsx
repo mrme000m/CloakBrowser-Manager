@@ -31,16 +31,20 @@ export function LaunchButton({ status, onLaunch, onStop }: LaunchButtonProps) {
 
   if (loading) {
     return (
-      <button disabled className="btn-secondary opacity-60 cursor-not-allowed flex items-center gap-1.5">
+      <button disabled className="btn-secondary opacity-60 cursor-not-allowed flex items-center gap-1.5" aria-live="polite">
         <Loader2 className="h-3.5 w-3.5 animate-spin" />
-        <span>{status === "running" ? "Stopping..." : "Launching..."}</span>
+        <span>{status === "running" ? "Stopping…" : "Launching…"}</span>
       </button>
     );
   }
 
   if (status === "running") {
     return (
-      <button onClick={handleClick} className="btn-danger flex items-center gap-1.5">
+      <button
+        onClick={handleClick}
+        className="btn-danger flex items-center gap-1.5"
+        aria-label={`Stop profile (currently running)`}
+      >
         <Square className="h-3.5 w-3.5" />
         <span>Stop</span>
       </button>
@@ -49,11 +53,15 @@ export function LaunchButton({ status, onLaunch, onStop }: LaunchButtonProps) {
 
   return (
     <div>
-      <button onClick={handleClick} className="btn-primary flex items-center gap-1.5">
+      <button
+        onClick={handleClick}
+        className="btn-primary flex items-center gap-1.5"
+        aria-label="Launch profile"
+      >
         <Play className="h-3.5 w-3.5" />
         <span>Launch</span>
       </button>
-      {error && <p className="text-red-400 text-xs mt-1">{error}</p>}
+      {error && <p className="text-red-400 text-xs mt-1 text-right" role="alert">{error}</p>}
     </div>
   );
 }

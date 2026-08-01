@@ -212,7 +212,7 @@ export function ProfileForm({ profile, proxyCredentials, proxyGroups, onSave, on
 
   return (
     <form onSubmit={handleSubmit} className="p-6 max-w-2xl mx-auto">
-      <div className="flex items-center justify-between mb-6">
+      <div className="flex items-center justify-between mb-8">
         <div className="flex items-center gap-2">
           <h2 className="text-lg font-semibold">
             {isEdit ? "Edit Profile" : "New Profile"}
@@ -240,11 +240,11 @@ export function ProfileForm({ profile, proxyCredentials, proxyGroups, onSave, on
         </div>
       </div>
 
-      <div className="space-y-5">
+      <div className="space-y-6">
         {/* Basic */}
         <section>
-          <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-3">Basic</h3>
-          <div className="grid grid-cols-2 gap-3">
+          <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-4">Basic</h3>
+          <div className="grid grid-cols-2 gap-4">
             <div className="col-span-2">
               <label className="label">Profile Name</label>
               <input
@@ -282,6 +282,7 @@ export function ProfileForm({ profile, proxyCredentials, proxyGroups, onSave, on
                   onClick={randomizeSeed}
                   className="btn-secondary px-2.5"
                   title="Randomize seed"
+                  aria-label="Randomize fingerprint seed"
                 >
                   <svg className="h-5 w-5" viewBox="0 0 32 32" fill="none" stroke="currentColor" strokeWidth="1.2" strokeLinejoin="round">
                     <polygon points="28,10 16,16 16,28 28,22" fill="currentColor" opacity="0.06" />
@@ -318,7 +319,7 @@ export function ProfileForm({ profile, proxyCredentials, proxyGroups, onSave, on
 
         {/* Network */}
         <section>
-          <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-3">Network</h3>
+          <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-4">Network</h3>
           <div className="space-y-3">
             {/* Proxy mode selector */}
             <div>
@@ -380,7 +381,7 @@ export function ProfileForm({ profile, proxyCredentials, proxyGroups, onSave, on
               )}
             </div>
 
-            <div className="grid grid-cols-2 gap-3">
+            <div className="grid grid-cols-2 gap-4">
               <div>
                 <label className="label">Timezone</label>
                 <input
@@ -414,7 +415,7 @@ export function ProfileForm({ profile, proxyCredentials, proxyGroups, onSave, on
 
         {/* Hardware */}
         <section>
-          <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-3">Hardware</h3>
+          <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-4">Hardware</h3>
           <div className="space-y-3">
             <div>
               <label className="label">Screen Resolution</label>
@@ -436,7 +437,7 @@ export function ProfileForm({ profile, proxyCredentials, proxyGroups, onSave, on
               </select>
             </div>
             {currentResolution === "custom" && (
-              <div className="grid grid-cols-2 gap-3">
+              <div className="grid grid-cols-2 gap-4">
                 <div>
                   <label className="label">Width</label>
                   <input
@@ -506,7 +507,7 @@ export function ProfileForm({ profile, proxyCredentials, proxyGroups, onSave, on
         {/* CDP Endpoint */}
         {isEdit && profile.cdp_endpoint && (
           <section>
-            <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-3">CDP Endpoint</h3>
+            <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-4">CDP Endpoint</h3>
             <div className="bg-surface-2 border border-border rounded-md p-3">
               <div className="flex items-center gap-2 mb-2">
                 <Code2 className="h-3.5 w-3.5 text-accent" />
@@ -526,7 +527,8 @@ export function ProfileForm({ profile, proxyCredentials, proxyGroups, onSave, on
                       setTimeout(() => setCdpCopied(false), 2000);
                     });
                   }}
-                  className={`p-1.5 rounded ${cdpCopied ? "text-emerald-400" : "text-gray-500 hover:text-gray-300"}`}
+                  className={`icon-btn flex-shrink-0 ${cdpCopied ? "text-emerald-400" : "text-gray-500 hover:text-gray-300"}`}
+                  aria-label={cdpCopied ? "Copied CDP URL" : "Copy CDP URL"}
                   title={cdpCopied ? "Copied!" : "Copy CDP URL"}
                 >
                   {cdpCopied ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
@@ -541,7 +543,7 @@ export function ProfileForm({ profile, proxyCredentials, proxyGroups, onSave, on
 
         {/* Behavior */}
         <section>
-          <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-3">Behavior</h3>
+          <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-4">Behavior</h3>
           <div className="space-y-3">
             <label className="flex items-center gap-2 text-sm text-gray-300 cursor-pointer">
               <input
@@ -635,7 +637,7 @@ export function ProfileForm({ profile, proxyCredentials, proxyGroups, onSave, on
 
         {/* Tags */}
         <section>
-          <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-3">Tags</h3>
+          <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-4">Tags</h3>
           {(form.tags ?? []).length > 0 && (
             <div className="flex flex-wrap gap-1.5 mb-3">
               {(form.tags ?? []).map((t) => (
@@ -649,6 +651,7 @@ export function ProfileForm({ profile, proxyCredentials, proxyGroups, onSave, on
                     type="button"
                     onClick={() => removeTag(t.tag)}
                     className="hover:opacity-70"
+                    aria-label={`Remove tag ${t.tag}`}
                   >
                     <X className="h-3 w-3" />
                   </button>
@@ -669,6 +672,8 @@ export function ProfileForm({ profile, proxyCredentials, proxyGroups, onSave, on
                     borderColor: tagColor === c ? "#fff" : "transparent",
                     transform: tagColor === c ? "scale(1.2)" : undefined,
                   }}
+                  aria-label={`Tag color ${c}`}
+                  aria-pressed={tagColor === c}
                 />
               ))}
             </div>
@@ -687,7 +692,7 @@ export function ProfileForm({ profile, proxyCredentials, proxyGroups, onSave, on
 
         {/* Launch Args */}
         <section>
-          <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-3">Launch Args</h3>
+          <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-4">Launch Args</h3>
           <p className="text-xs text-gray-500 mb-2">Custom Chromium flags passed at launch (e.g. --load-extension, --disable-features)</p>
           {(form.launch_args ?? []).length > 0 && (
             <div className="flex flex-wrap gap-1.5 mb-3">
@@ -701,6 +706,7 @@ export function ProfileForm({ profile, proxyCredentials, proxyGroups, onSave, on
                     type="button"
                     onClick={() => removeLaunchArg(idx)}
                     className="hover:opacity-70"
+                    aria-label={`Remove launch argument ${arg}`}
                   >
                     <X className="h-3 w-3" />
                   </button>
@@ -724,7 +730,7 @@ export function ProfileForm({ profile, proxyCredentials, proxyGroups, onSave, on
 
         {/* Notes */}
         <section>
-          <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-3">Notes</h3>
+          <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-4">Notes</h3>
           <textarea
             className="input min-h-[80px] resize-y"
             value={form.notes ?? ""}

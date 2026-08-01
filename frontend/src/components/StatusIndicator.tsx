@@ -8,7 +8,11 @@ export function StatusIndicator({ status, size = "sm" }: StatusIndicatorProps) {
   const isRunning = status === "running";
 
   return (
-    <span className="relative inline-flex">
+    <span
+      className="relative inline-flex"
+      role="status"
+      aria-label={isRunning ? "Running" : "Stopped"}
+    >
       {isRunning && (
         <span
           className={`absolute inline-flex ${sizeClass} rounded-full bg-emerald-400 opacity-75 animate-ping`}
@@ -19,6 +23,7 @@ export function StatusIndicator({ status, size = "sm" }: StatusIndicatorProps) {
           isRunning ? "bg-emerald-400" : "bg-gray-500"
         }`}
       />
+      <span className="sr-only">{isRunning ? "Running" : "Stopped"}</span>
     </span>
   );
 }

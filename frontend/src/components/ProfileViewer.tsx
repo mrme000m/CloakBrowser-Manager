@@ -35,7 +35,8 @@ export function ProfileViewer({ profileId, cdpUrl, cdpEndpoint, clipboardSync: i
   const [error, setError] = useState<string | null>(null);
   const [fullscreen, setFullscreen] = useState(false);
   const [clipboardSync, setClipboardSync] = useState(initialClipboardSync);
-  const [cdpCopied, setCdpCopied] = useState(false);
+  // Per-target "copied" feedback so only the actually-copied control shows a check.
+  const [copiedKey, setCopiedKey] = useState<string | null>(null);
   const [cdpDropdown, setCdpDropdown] = useState(false);
   // Runtime status: geoip + active CDP client count (polled while connected)
   const [geoip, setGeoip] = useState<{ exit_ip: string | null; tz: string | null; locale: string | null }>({ exit_ip: null, tz: null, locale: null });
@@ -248,12 +249,25 @@ export function ProfileViewer({ profileId, cdpUrl, cdpEndpoint, clipboardSync: i
     return () => container.removeEventListener("wheel", handleWheel);
   }, []);
 
-  const copyText = (text: string) => {
+  const copyText = (text: string, key: string) => {
     navigator.clipboard?.writeText(text).then(() => {
-      setCdpCopied(true);
-      setTimeout(() => setCdpCopied(false), 2000);
+      setCopiedKey(key);
+      setTimeout(() => setCopiedKey(null), 2000);
     });
   };
+
+  // Close the CDP dropdown on Escape while it's open.
+  useEffect(() => {
+    if (!cdpDropdown) return;
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.stopPropagation();
+        setCdpDropdown(false);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [cdpDropdown]);
 
   // Authorization header snippet — rendered only when the manager has auth enabled.
   // The token lives in an httponic cookie the browser can't read, so it's a placeholder.
@@ -283,7 +297,7 @@ const browser = await chromium.connectOverCDP("${cdpWsUrl}"${headersArg ? `{${he
   return (
     <div className="relative h-full flex flex-col">
       {/* Toolbar */}
-      <div className="flex items-center justify-between px-3 py-1.5 bg-surface-1 border-b border-border">
+      <div className="flex items-center justify-between px-4 py-2 bg-surface-1 border-b border-border">
         <div className="flex items-center gap-2">
           <span className={`h-2 w-2 rounded-full ${connected ? "bg-emerald-400" : "bg-yellow-400 animate-pulse"}`} />
           <span className="text-xs text-gray-400">
@@ -315,9 +329,12 @@ const browser = await chromium.connectOverCDP("${cdpWsUrl}"${headersArg ? `{${he
             <div className="relative">
               <button
                 onClick={() => setCdpDropdown(!cdpDropdown)}
-                className={`flex items-center gap-1 px-2 py-1 rounded text-xs ${
-                  cdpCopied ? "text-emerald-400" : "text-gray-500 hover:text-gray-300"
+                className={`flex items-center gap-1 px-2 py-1 rounded text-xs transition-colors ${
+                  cdpDropdown ? "text-accent bg-surface-3" : "text-gray-500 hover:text-gray-300"
                 }`}
+                aria-label="CDP connection info"
+                aria-expanded={cdpDropdown}
+                aria-haspopup="menu"
                 title="CDP connection info"
               >
                 <Code2 className="h-3.5 w-3.5" />
@@ -326,94 +343,102 @@ const browser = await chromium.connectOverCDP("${cdpWsUrl}"${headersArg ? `{${he
               </button>
 
               {cdpDropdown && (
-                <div className="absolute right-0 top-full mt-1 w-80 bg-surface-1 border border-border rounded-md shadow-xl z-50 p-3">
-                  <h4 className="text-xs font-semibold text-gray-300 mb-2">
-                    Chrome DevTools Protocol
-                  </h4>
+                <>
+                  {/* Click-away backdrop (sits below the panel so clicks inside the panel are never swallowed) */}
+                  <div className="fixed inset-0 z-40" onClick={() => setCdpDropdown(false)} aria-hidden="true" />
 
-                  {/* WS URL */}
-                  <div className="mb-3">
-                    <label className="text-[10px] font-medium text-gray-500 uppercase mb-1 block">
-                      WebSocket Endpoint
-                    </label>
-                    <div className="flex items-center gap-1">
-                      <code className="flex-1 text-[11px] text-gray-400 font-mono bg-surface-2 rounded px-2 py-1 break-all select-all">
-                        {cdpWsUrl}
-                      </code>
-                      <button
-                        onClick={() => copyText(cdpWsUrl)}
-                        className="p-1 text-gray-500 hover:text-gray-300 flex-shrink-0"
-                        title={cdpCopied ? "Copied!" : "Copy WS URL"}
-                      >
-                        {cdpCopied ? <Check className="h-3 w-3 text-emerald-400" /> : <Copy className="h-3 w-3" />}
-                      </button>
+                  <div className="absolute right-0 top-full mt-1 w-80 bg-surface-1 border border-border rounded-md shadow-xl z-50 p-3 animate-fade-scale-in" role="menu">
+                    <h4 className="text-xs font-semibold text-gray-300 mb-2">
+                      Chrome DevTools Protocol
+                    </h4>
+
+                    {/* WS URL */}
+                    <div className="mb-3">
+                      <label className="text-[10px] font-medium text-gray-500 uppercase mb-1 block">
+                        WebSocket Endpoint
+                      </label>
+                      <div className="flex items-center gap-1">
+                        <code className="flex-1 text-[11px] text-gray-400 font-mono bg-surface-2 rounded px-2 py-1 break-all select-all">
+                          {cdpWsUrl}
+                        </code>
+                        <button
+                          onClick={() => copyText(cdpWsUrl, "ws")}
+                          className="icon-btn icon-btn-sm text-gray-500 hover:text-gray-300 flex-shrink-0"
+                          aria-label="Copy WebSocket endpoint"
+                          title={copiedKey === "ws" ? "Copied!" : "Copy WS URL"}
+                        >
+                          {copiedKey === "ws" ? <Check className="h-3 w-3 text-emerald-400" /> : <Copy className="h-3 w-3" />}
+                        </button>
+                      </div>
                     </div>
-                  </div>
 
-                  {/* Connect snippets */}
-                  <div className="mb-3">
-                    <label className="text-[10px] font-medium text-gray-500 uppercase mb-1 block">
-                      Connect
-                    </label>
-                    {([
-                      { label: "Playwright (Python)", code: playwrightPython },
-                      { label: "Playwright (JS)", code: playwrightJs },
-                      { label: "Puppeteer", code: puppeteer },
-                      { label: "curl /json/list", code: curlJson },
-                    ] as const).map((s) => (
-                      <div key={s.label} className="mb-1.5">
-                        <div className="text-[9px] text-gray-500 mb-0.5">{s.label}</div>
-                        <div className="flex items-start gap-1">
+                    {/* Connect snippets */}
+                    <div className="mb-3">
+                      <label className="text-[10px] font-medium text-gray-500 uppercase mb-1 block">
+                        Connect
+                      </label>
+                      {([
+                        { key: "pw-python", label: "Playwright (Python)", code: playwrightPython },
+                        { key: "pw-js", label: "Playwright (JS)", code: playwrightJs },
+                        { key: "puppeteer", label: "Puppeteer", code: puppeteer },
+                        { key: "curl", label: "curl /json/list", code: curlJson },
+                      ] as const).map((s) => (
+                        <div key={s.key} className="mb-1.5">
+                          <div className="text-[9px] text-gray-500 mb-0.5">{s.label}</div>
+                          <div className="flex items-start gap-1">
                           <pre className="flex-1 text-[10px] text-gray-400 font-mono bg-surface-2 rounded px-2 py-1 break-all max-h-14 overflow-y-auto whitespace-pre-wrap">
 {s.code}
                           </pre>
                           <button
-                            onClick={() => copyText(s.code)}
-                            className="p-1 text-gray-500 hover:text-gray-300 flex-shrink-0"
-                            title={cdpCopied ? "Copied!" : `Copy ${s.label}`}
+                            onClick={() => copyText(s.code, s.key)}
+                            className="icon-btn icon-btn-sm text-gray-500 hover:text-gray-300 flex-shrink-0"
+                            aria-label={`Copy ${s.label}`}
+                            title={copiedKey === s.key ? "Copied!" : `Copy ${s.label}`}
                           >
-                            {cdpCopied ? <Check className="h-3 w-3 text-emerald-400" /> : <Copy className="h-3 w-3" />}
+                            {copiedKey === s.key ? <Check className="h-3 w-3 text-emerald-400" /> : <Copy className="h-3 w-3" />}
                           </button>
+                          </div>
                         </div>
-                      </div>
-                    ))}
-                    {authRequired && (
-                      <p className="text-[9px] text-gray-600 mt-1">
-                        Replace <code className="text-accent">&lt;YOUR_TOKEN&gt;</code> with your auth token (required over the tunnel).
-                      </p>
-                    )}
-                  </div>
-
-                  {/* chrome-devtools-mcp command */}
-                  <div className="mb-3">
-                    <label className="text-[10px] font-medium text-gray-500 uppercase mb-1 block">
-                      chrome-devtools-mcp
-                    </label>
-                    <div className="flex items-start gap-1">
-                      <code className="flex-1 text-[10px] text-gray-400 font-mono bg-surface-2 rounded px-2 py-1.5 break-all max-h-16 overflow-y-auto">
-                        npx -y chrome-devtools-mcp@latest --wsEndpoint={cdpWsUrl} --usageStatistics=false
-                      </code>
-                      <button
-                        onClick={() => copyText(
-                          `npx -y chrome-devtools-mcp@latest --wsEndpoint=${cdpWsUrl} --usageStatistics=false`,
-                        )}
-                        className="p-1 text-gray-500 hover:text-gray-300 flex-shrink-0"
-                        title={cdpCopied ? "Copied!" : "Copy command"}
-                      >
-                        {cdpCopied ? <Check className="h-3 w-3 text-emerald-400" /> : <Copy className="h-3 w-3" />}
-                      </button>
+                      ))}
+                      {authRequired && (
+                        <p className="text-[9px] text-gray-600 mt-1">
+                          Replace <code className="text-accent">&lt;YOUR_TOKEN&gt;</code> with your auth token (required over the tunnel).
+                        </p>
+                      )}
                     </div>
-                    <p className="text-[9px] text-gray-600 mt-0.5">
-                      Add <code className="text-accent">--wsHeaders={'{"Authorization":"Bearer &lt;token&gt;"}'}</code> if auth is enabled
-                    </p>
-                  </div>
 
-                  {/* MCP config */}
-                  <div>
-                    <label className="text-[10px] font-medium text-gray-500 uppercase mb-1 block">
-                      MCP Server Config
-                    </label>
-                    <div className="flex items-start gap-1">
+                    {/* chrome-devtools-mcp command */}
+                    <div className="mb-3">
+                      <label className="text-[10px] font-medium text-gray-500 uppercase mb-1 block">
+                        chrome-devtools-mcp
+                      </label>
+                      <div className="flex items-start gap-1">
+                        <code className="flex-1 text-[10px] text-gray-400 font-mono bg-surface-2 rounded px-2 py-1.5 break-all max-h-16 overflow-y-auto">
+                          npx -y chrome-devtools-mcp@latest --wsEndpoint={cdpWsUrl} --usageStatistics=false
+                        </code>
+                        <button
+                          onClick={() => copyText(
+                            `npx -y chrome-devtools-mcp@latest --wsEndpoint=${cdpWsUrl} --usageStatistics=false`,
+                            "mcp-cmd",
+                          )}
+                          className="icon-btn icon-btn-sm text-gray-500 hover:text-gray-300 flex-shrink-0"
+                          aria-label="Copy chrome-devtools-mcp command"
+                          title={copiedKey === "mcp-cmd" ? "Copied!" : "Copy command"}
+                        >
+                          {copiedKey === "mcp-cmd" ? <Check className="h-3 w-3 text-emerald-400" /> : <Copy className="h-3 w-3" />}
+                        </button>
+                      </div>
+                      <p className="text-[9px] text-gray-600 mt-0.5">
+                        Add <code className="text-accent">--wsHeaders={'{"Authorization":"Bearer &lt;token&gt;"}'}</code> if auth is enabled
+                      </p>
+                    </div>
+
+                    {/* MCP config */}
+                    <div>
+                      <label className="text-[10px] font-medium text-gray-500 uppercase mb-1 block">
+                        MCP Server Config
+                      </label>
+                      <div className="flex items-start gap-1">
                       <pre className="flex-1 text-[10px] text-gray-400 font-mono bg-surface-2 rounded px-2 py-1.5 break-all max-h-24 overflow-y-auto">
 {`{
   "mcpServers": {
@@ -430,28 +455,27 @@ const browser = await chromium.connectOverCDP("${cdpWsUrl}"${headersArg ? `{${he
                       <button
                         onClick={() => copyText(
                           `{"mcpServers":{"chrome-devtools":{"command":"npx","args":["-y","chrome-devtools-mcp@latest","--wsEndpoint=${cdpWsUrl}","--usageStatistics=false"],"enabled":true}}}`,
+                          "mcp-config",
                         )}
-                        className="p-1 text-gray-500 hover:text-gray-300 flex-shrink-0"
-                        title={cdpCopied ? "Copied!" : "Copy config"}
+                        className="icon-btn icon-btn-sm text-gray-500 hover:text-gray-300 flex-shrink-0"
+                        aria-label="Copy MCP server config"
+                        title={copiedKey === "mcp-config" ? "Copied!" : "Copy config"}
                       >
-                        {cdpCopied ? <Check className="h-3 w-3 text-emerald-400" /> : <Copy className="h-3 w-3" />}
+                        {copiedKey === "mcp-config" ? <Check className="h-3 w-3 text-emerald-400" /> : <Copy className="h-3 w-3" />}
                       </button>
+                      </div>
                     </div>
                   </div>
-
-                  {/* Close backdrop */}
-                  <div
-                    className="fixed inset-0 z-[-1]"
-                    onClick={() => setCdpDropdown(false)}
-                  />
-                </div>
+                </>
               )}
             </div>
           )}
 
           <button
             onClick={() => setClipboardSync(!clipboardSync)}
-            className={`p-1 ${clipboardSync ? "text-accent" : "text-gray-500 hover:text-gray-300"}`}
+            className={`icon-btn ${clipboardSync ? "text-accent" : "text-gray-500 hover:text-gray-300"}`}
+            aria-label={clipboardSync ? "Disable clipboard sync" : "Enable clipboard sync"}
+            aria-pressed={clipboardSync}
             title={clipboardSync ? "Disable clipboard sync" : "Enable clipboard sync"}
             disabled={!connected}
           >
@@ -459,7 +483,8 @@ const browser = await chromium.connectOverCDP("${cdpWsUrl}"${headersArg ? `{${he
           </button>
           <button
             onClick={toggleFullscreen}
-            className="text-gray-500 hover:text-gray-300 p-1"
+            className="icon-btn text-gray-500 hover:text-gray-300"
+            aria-label={fullscreen ? "Exit fullscreen" : "Enter fullscreen"}
             title={fullscreen ? "Exit fullscreen" : "Fullscreen"}
           >
             {fullscreen ? <Minimize2 className="h-3.5 w-3.5" /> : <Maximize2 className="h-3.5 w-3.5" />}

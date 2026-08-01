@@ -91,41 +91,54 @@ export function ProfileList({
     onDuplicate?.(id);
   };
 
+  // Keyboard activation for the row (which is role="button"); the inner
+  // checkbox + action buttons handle their own keys.
+  const onRowKeyDown = (e: React.KeyboardEvent, id: string) => {
+    if (e.key === "Enter" || e.key === " ") {
+      e.preventDefault();
+      onSelect(id);
+    }
+  };
+
   return (
-    <div className="flex flex-col h-full">
+    <div className="flex flex-col min-h-0 flex-1">
       {/* Header */}
-      <div className="p-4 border-b border-border">
+      <div className="px-5 pt-4 pb-3 border-b border-border flex-shrink-0">
         <div className="flex items-center gap-2 mb-3">
-          <Monitor className="h-4 w-4 text-accent" />
+          <div className="h-6 w-6 rounded-md bg-accent/10 flex items-center justify-center flex-shrink-0">
+            <Monitor className="h-3.5 w-3.5 text-accent" />
+          </div>
           <h1 className="text-sm font-semibold tracking-tight">CloakBrowser Manager</h1>
         </div>
         {runningCount > 0 && (
-          <div className="text-xs text-gray-500 mb-3">
-            {runningCount} running{maxRunning ? ` of ${maxRunning}` : ""}
+          <div className="text-[11px] text-gray-400 mb-3 flex items-center gap-1.5">
+            <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400">
+              <span className="h-1.5 w-1.5 rounded-full bg-emerald-400" />
+              {runningCount} running{maxRunning ? ` / ${maxRunning}` : ""}
+            </span>
           </div>
         )}
         {/* Search */}
         <div className="relative mb-2">
-          <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-gray-500" />
+          <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-3.5 w-3.5 text-gray-500 pointer-events-none" />
           <input
             type="text"
-            placeholder="Search profiles..."
+            placeholder="Search profiles…"
             value={search}
             onChange={(e) => setSearch(e.target.value)}
             className="input pl-8 py-1.5 text-xs"
+            aria-label="Search profiles"
           />
         </div>
         {/* Filter tabs */}
-        <div className="flex gap-1">
+        <div className="flex gap-1.5" role="tablist" aria-label="Filter profiles">
           {(["all", "profiles", "templates"] as const).map((f) => (
             <button
               key={f}
+              role="tab"
+              aria-selected={filter === f}
               onClick={() => setFilter(f)}
-              className={`text-[10px] px-2 py-0.5 rounded capitalize transition-colors ${
-                filter === f
-                  ? "bg-surface-3 text-gray-200"
-                  : "text-gray-500 hover:text-gray-300"
-              }`}
+              className={`tab ${filter === f ? "tab-active" : ""}`}
             >
               {f}
             </button>
@@ -135,8 +148,8 @@ export function ProfileList({
 
       {/* Bulk action bar */}
       {someSelected && (
-        <div className="flex items-center gap-1 px-3 py-2 border-b border-border bg-surface-2 text-xs">
-          <span className="text-gray-400 mr-1">{selectedIds.size} selected</span>
+        <div className="flex items-center gap-1 px-5 py-2 border-b border-border bg-surface-2 text-xs flex-shrink-0">
+          <span className="text-gray-400 mr-1 tabular-nums">{selectedIds.size} selected</span>
           <button
             onClick={() => { onBulkLaunch?.(selectedArr); clearSelection(); }}
             className="px-2 py-0.5 rounded bg-emerald-600/20 text-emerald-300 hover:bg-emerald-600/30"
@@ -167,7 +180,7 @@ export function ProfileList({
       )}
 
       {/* Profile list */}
-      <div className="flex-1 overflow-y-auto p-2">
+      <div className="flex-1 overflow-y-auto p-2 min-h-0">
         {filtered.length === 0 && (
           <div className="text-center text-gray-500 text-xs py-8">
             {profiles.length === 0 ? "No profiles yet" : "No matches"}
@@ -175,25 +188,28 @@ export function ProfileList({
         )}
         {/* Select-all row */}
         {filtered.length > 0 && (
-          <div className="flex items-center gap-2 px-3 py-1 mb-1 text-[10px] text-gray-500">
+          <label className="flex items-center gap-2 px-3 py-1 mb-1 text-[11px] text-gray-500 cursor-pointer hover:text-gray-400">
             <input
               type="checkbox"
               checked={allSelected}
               onChange={toggleSelectAll}
-              className="rounded border-border bg-surface-2"
+              aria-label="Select all filtered profiles"
             />
             <span>Select all ({filtered.length})</span>
-          </div>
+          </label>
         )}
         {filtered.map((profile) => (
-          <button
+          <div
             key={profile.id}
+            role="button"
+            tabIndex={0}
             onClick={() => onSelect(profile.id)}
-            className={`w-full text-left px-3 py-2.5 rounded-md mb-1 transition-colors ${
-              selectedId === profile.id
-                ? "bg-surface-3 border border-border-hover"
-                : "hover:bg-surface-2 border border-transparent"
-            }`}
+            onKeyDown={(e) => onRowKeyDown(e, profile.id)}
+            aria-pressed={selectedId === profile.id}
+            className={`w-full text-left px-3 py-2.5 rounded-md mb-1 transition-colors cursor-pointer outline-none
+              ${selectedId === profile.id
+                ? "bg-surface-3 border border-border-hover focus-visible:ring-2 focus-visible:ring-accent/40"
+                : "hover:bg-surface-2 border border-transparent focus-visible:ring-2 focus-visible:ring-accent/30"}`}
           >
             <div className="flex items-center gap-2">
               <input
@@ -201,7 +217,8 @@ export function ProfileList({
                 checked={selectedIds.has(profile.id)}
                 onChange={(e) => { e.stopPropagation(); toggleSelect(profile.id); }}
                 onClick={(e) => e.stopPropagation()}
-                className="rounded border-border bg-surface-2 flex-shrink-0"
+                className="flex-shrink-0"
+                aria-label={`Select ${profile.name}`}
               />
               <StatusIndicator status={profile.status} />
               <span className="text-sm font-medium truncate flex-1">{profile.name}</span>
@@ -214,7 +231,8 @@ export function ProfileList({
               {onDuplicate && (
                 <button
                   onClick={(e) => duplicate(e, profile.id)}
-                  className="p-0.5 rounded text-gray-500 hover:text-accent flex-shrink-0"
+                  className="icon-btn icon-btn-sm text-gray-500 hover:text-accent flex-shrink-0"
+                  aria-label={profile.is_template ? `New profile from template ${profile.name}` : `Duplicate ${profile.name}`}
                   title={profile.is_template ? "New profile from template" : "Duplicate profile"}
                 >
                   <Files className="h-3 w-3" />
@@ -223,16 +241,17 @@ export function ProfileList({
               {profile.cdp_endpoint && (
                 <button
                   onClick={(e) => copyCdp(e, profile)}
-                  className={`p-0.5 rounded transition-colors flex-shrink-0 ${
+                  className={`icon-btn icon-btn-sm flex-shrink-0 ${
                     cdpCopiedId === profile.id ? "text-emerald-400" : "text-gray-500 hover:text-accent"
                   }`}
+                  aria-label={cdpCopiedId === profile.id ? "Copied CDP endpoint" : `Copy CDP endpoint for ${profile.name}`}
                   title={cdpCopiedId === profile.id ? "Copied!" : `Copy CDP: ${profile.cdp_endpoint}`}
                 >
                   {cdpCopiedId === profile.id ? <Check className="h-3 w-3" /> : <Code2 className="h-3 w-3" />}
                 </button>
               )}
             </div>
-            <div className="flex items-center gap-2 mt-1 ml-9">
+            <div className="flex items-center gap-2 mt-1 ml-10">
               <span className="text-xs text-gray-500 capitalize">{profile.platform}</span>
               {(profile.proxy || profile.proxy_credential || profile.proxy_group) && (
                 <>
@@ -267,7 +286,7 @@ export function ProfileList({
                 <>
                   <span className="text-xs text-gray-600">·</span>
                   <span
-                    className="text-xs text-gray-500 font-mono"
+                    className="text-xs text-gray-500 font-mono tabular-nums"
                     title={`CPU ${profile.resources.cpu_percent ?? "—"}% · ${(profile.resources.mem_mb ?? 0).toFixed(0)} MB RSS · up ${formatUptime(profile.resources.uptime_s) ?? "—"} · ${profile.resources.proc_count ?? "—"} proc`}
                   >
                     CPU {profile.resources.cpu_percent ?? "—"}% · {(profile.resources.mem_mb ?? 0).toFixed(0)}MB
@@ -276,7 +295,7 @@ export function ProfileList({
               )}
             </div>
             {profile.tags.length > 0 && (
-              <div className="flex gap-1 mt-1.5 ml-9 flex-wrap">
+              <div className="flex gap-1 mt-1.5 ml-10 flex-wrap">
                 {profile.tags.map((t) => (
                   <span
                     key={t.tag}
@@ -288,13 +307,13 @@ export function ProfileList({
                 ))}
               </div>
             )}
-          </button>
+          </div>
         ))}
       </div>
 
       {/* New profile button */}
-      <div className="p-3 border-t border-border">
-        <button onClick={onNew} className="btn-secondary w-full flex items-center justify-center gap-1.5">
+      <div className="px-5 py-3 border-t border-border flex-shrink-0">
+        <button onClick={onNew} className="btn-primary w-full flex items-center justify-center gap-1.5">
           <Plus className="h-3.5 w-3.5" />
           <span>New Profile</span>
         </button>

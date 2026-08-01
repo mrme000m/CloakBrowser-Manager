@@ -10,8 +10,9 @@ import asyncio
 import hmac
 import logging
 import os
-import struct
+import random
 import shutil
+import struct
 from contextlib import asynccontextmanager
 from http.cookies import SimpleCookie
 from pathlib import Path
@@ -837,6 +838,38 @@ async def clone_profile(profile_id: str, body: CloneRequest, request: Request):
     if not cloned:
         raise HTTPException(status_code=404, detail="Profile not found")
     return _enrich_profile(cloned, request.scope)
+
+
+@app.post("/api/profiles/{profile_id}/reseed", response_model=ProfileResponse)
+async def reseed_profile(profile_id: str, request: Request):
+    """Generate a new random fingerprint seed for a profile.
+
+    The new seed takes effect the next time the profile is launched; the
+    running browser (if any) is left untouched.
+    """
+    profile = db.get_profile(profile_id)
+    if not profile:
+        raise HTTPException(status_code=404, detail="Profile not found")
+    old_seed = profile.get("fingerprint_seed")
+    new_seed = random.randint(10000, 99999)
+    while new_seed == old_seed:
+        new_seed = random.randint(10000, 99999)
+    updated = db.update_profile(profile_id, fingerprint_seed=new_seed)
+    if not updated:
+        raise HTTPException(status_code=404, detail="Profile not found")
+    return _enrich_profile(updated, request.scope)
+
+
+@app.post("/api/profiles/{profile_id}/reset-ua", response_model=ProfileResponse)
+async def reset_profile_user_agent(profile_id: str, request: Request):
+    """Clear the explicit User-Agent override so it is regenerated on launch."""
+    profile = db.get_profile(profile_id)
+    if not profile:
+        raise HTTPException(status_code=404, detail="Profile not found")
+    updated = db.update_profile(profile_id, user_agent=None)
+    if not updated:
+        raise HTTPException(status_code=404, detail="Profile not found")
+    return _enrich_profile(updated, request.scope)
 
 
 @app.post("/api/profiles/{profile_id}/stop")
