@@ -1,6 +1,13 @@
 import { useEffect, useRef, useState } from "react";
 import { ClipboardCopy, Code2, Maximize2, Minimize2, Copy, Check, ChevronDown } from "lucide-react";
 import { api, type ProfileResources } from "../lib/api";
+import {
+  MAC_CMD_SHORTCUTS,
+  isMacCmdShortcut,
+  isPasteShortcut,
+  sendCtrlCombo,
+  sendPasteKeys,
+} from "../lib/vncKeys";
 
 /** Compact "1d 2h 3m" / "3m 12s" formatter for uptime seconds. */
 function formatUptime(s: number | null | undefined): string | null {
@@ -25,8 +32,9 @@ interface ProfileViewerProps {
   onDisconnect: () => void;
 }
 
-// X11 keysym for V key (Ctrl is already held in VNC by the time we intercept)
-const XK_v = 0x0076;
+// How long the keydown handler waits for a native `paste` event before
+// falling back to the async Clipboard API (Safari).
+const PASTE_FALLBACK_DELAY_MS = 200;
 
 export function ProfileViewer({ profileId, cdpUrl, cdpEndpoint, clipboardSync: initialClipboardSync, authRequired, onDisconnect }: ProfileViewerProps) {
   const containerRef = useRef<HTMLDivElement>(null);
@@ -136,39 +144,80 @@ export function ProfileViewer({ profileId, cdpUrl, cdpEndpoint, clipboardSync: i
     return () => { cancelled = true; clearInterval(interval); };
   }, [profileId, connected]);
 
-  // Host→VNC: intercept Ctrl+V/Cmd+V at keydown (capture phase)
+  // Host→VNC clipboard & macOS shortcut handling.
+  //
+  // Paste: prefer the native `paste` event — it exposes the clipboard via
+  // `clipboardData` without async-clipboard permissions and works on every
+  // Chromium/Firefox. Safari doesn't fire `paste` on non-editable targets, so
+  // the keydown handler falls back to `navigator.clipboard.readText()` when no
+  // paste event arrives shortly after the shortcut.
+  //
+  // macOS Cmd+C/X/A/Z/Y: noVNC would forward these as Super+<key>, which does
+  // nothing in the Linux guest — translate them to Ctrl+<key> instead.
   useEffect(() => {
     const container = containerRef.current;
     if (!container || !clipboardSync || !connected) return;
 
-    const handleKeyDown = async (e: KeyboardEvent) => {
-      if (!(e.key === "v" && (e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey)) return;
+    // Timestamp of the last `paste` event we handled; lets the keydown
+    // fallback tell whether the browser delivered one.
+    let pasteHandledAt = 0;
 
-      e.stopPropagation();
-      e.preventDefault();
-
+    const pushTextAndPaste = async (text: string) => {
       const rfb = rfbRef.current;
       if (!rfb) return;
-
-      try {
-        const text = await navigator.clipboard.readText();
-        if (text) {
+      if (text) {
+        try {
           await api.setClipboard(profileId, text);
+        } catch (err) {
+          // Guest clipboard would be stale — better to paste nothing than the
+          // wrong thing.
+          console.warn("[clipboard] failed to push text to guest:", err);
+          return;
         }
-      } catch (err) {
-        console.warn("[clipboard] error:", err);
-        setClipboardSync(false);
+      }
+      sendPasteKeys(rfb);
+    };
+
+    const handlePaste = (e: ClipboardEvent) => {
+      e.preventDefault();
+      pasteHandledAt = Date.now();
+      void pushTextAndPaste(e.clipboardData?.getData("text/plain") ?? "");
+    };
+
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (isMacCmdShortcut(e)) {
+        e.preventDefault();
+        e.stopPropagation();
+        const rfb = rfbRef.current;
+        const keysym = MAC_CMD_SHORTCUTS[e.code];
+        if (rfb && keysym != null) sendCtrlCombo(rfb, keysym, e.code);
         return;
       }
 
-      rfb.sendKey(0xffe3, "ControlLeft", true);
-      rfb.sendKey(XK_v, "KeyV", true);
-      rfb.sendKey(XK_v, "KeyV", false);
-      rfb.sendKey(0xffe3, "ControlLeft", false);
+      if (!isPasteShortcut(e)) return;
+
+      // Keep noVNC from forwarding the raw keystroke, but DON'T preventDefault:
+      // the `paste` event is the default action of this keydown, and cancelling
+      // it here would stop the browser from dispatching it.
+      e.stopPropagation();
+      if (e.repeat) return;
+
+      const pressedAt = Date.now();
+      window.setTimeout(() => {
+        if (pasteHandledAt >= pressedAt) return; // `paste` event already handled it
+        navigator.clipboard
+          .readText()
+          .then((text) => void pushTextAndPaste(text))
+          .catch((err) => console.warn("[clipboard] readText failed:", err));
+      }, PASTE_FALLBACK_DELAY_MS);
     };
 
     container.addEventListener("keydown", handleKeyDown, true);
-    return () => container.removeEventListener("keydown", handleKeyDown, true);
+    container.addEventListener("paste", handlePaste, true);
+    return () => {
+      container.removeEventListener("keydown", handleKeyDown, true);
+      container.removeEventListener("paste", handlePaste, true);
+    };
   }, [profileId, clipboardSync, connected]);
 
   // VNC→Host clipboard event
