@@ -105,6 +105,7 @@ def test_get_status_stopped():
         "effective_timezone": None,
         "effective_locale": None,
         "resources": None,
+        "coherence_warnings": [],
     }
 
 
@@ -132,4 +133,5 @@ def test_get_status_running(monkeypatch):
         "effective_timezone": None,
         "effective_locale": None,
         "resources": None,
+        "coherence_warnings": [],
     }

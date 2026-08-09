@@ -45,13 +45,26 @@ def init_db():
                 gpu_vendor TEXT,
                 gpu_renderer TEXT,
                 hardware_concurrency INTEGER,
+                device_memory INTEGER,
+                brand TEXT,
+                brand_version TEXT,
+                platform_version TEXT,
+                fonts_dir TEXT,
+                storage_quota_mb INTEGER,
+                taskbar_height INTEGER,
+                geolocation_lat REAL,
+                geolocation_lon REAL,
+                webrtc_ip TEXT,
+                noise_enabled BOOLEAN DEFAULT 1,
                 humanize BOOLEAN DEFAULT 0,
                 human_preset TEXT DEFAULT 'default',
+                human_config TEXT,
                 headless BOOLEAN DEFAULT 0,
                 geoip BOOLEAN DEFAULT 0,
                 clipboard_sync BOOLEAN DEFAULT 1,
                 auto_launch BOOLEAN DEFAULT 0,
                 color_scheme TEXT,
+                launch_args TEXT DEFAULT '[]',
                 notes TEXT,
                 proxy_credential_id TEXT,
                 is_template BOOLEAN DEFAULT 0,
@@ -59,6 +72,13 @@ def init_db():
                 max_restarts INTEGER DEFAULT 5,
                 proxy_group_id TEXT,
                 proxy_assignment TEXT,
+                clear_on_launch BOOLEAN DEFAULT 0,
+                storage_state TEXT,
+                permissions TEXT,
+                device_scale_factor REAL,
+                is_mobile BOOLEAN DEFAULT 0,
+                has_touch BOOLEAN DEFAULT 0,
+                extension_paths TEXT,
                 user_data_dir TEXT NOT NULL,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
@@ -148,6 +168,33 @@ def init_db():
                 conn.execute(f"ALTER TABLE profiles ADD COLUMN {col} {ddl}")
                 conn.commit()
 
+        # Organic-fingerprint migrations (device memory, client hints, fonts, etc.)
+        _ORGANIC_FIELDS: list[tuple[str, str]] = [
+            ("device_memory", "INTEGER"),
+            ("brand", "TEXT"),
+            ("brand_version", "TEXT"),
+            ("platform_version", "TEXT"),
+            ("fonts_dir", "TEXT"),
+            ("storage_quota_mb", "INTEGER"),
+            ("taskbar_height", "INTEGER"),
+            ("geolocation_lat", "REAL"),
+            ("geolocation_lon", "REAL"),
+            ("webrtc_ip", "TEXT"),
+            ("noise_enabled", "BOOLEAN DEFAULT 1"),
+            ("human_config", "TEXT"),
+            ("clear_on_launch", "BOOLEAN DEFAULT 0"),
+            ("storage_state", "TEXT"),
+            ("permissions", "TEXT"),
+            ("device_scale_factor", "REAL"),
+            ("is_mobile", "BOOLEAN DEFAULT 0"),
+            ("has_touch", "BOOLEAN DEFAULT 0"),
+            ("extension_paths", "TEXT"),
+        ]
+        for col, ddl in _ORGANIC_FIELDS:
+            if col not in cols:
+                conn.execute(f"ALTER TABLE profiles ADD COLUMN {col} {ddl}")
+                conn.commit()
+
         cred_cols = {row[1] for row in conn.execute("PRAGMA table_info(proxy_credentials)").fetchall()}
         for col, ddl in (
             ("provider_id", "TEXT"),
@@ -182,12 +229,17 @@ def create_profile(
             """INSERT INTO profiles (
                 id, name, fingerprint_seed, proxy, timezone, locale, platform,
                 user_agent, screen_width, screen_height, gpu_vendor, gpu_renderer,
-                hardware_concurrency, humanize, human_preset, headless, geoip,
+                hardware_concurrency, device_memory, brand, brand_version,
+                platform_version, fonts_dir, storage_quota_mb, taskbar_height,
+                geolocation_lat, geolocation_lon, webrtc_ip, noise_enabled,
+                humanize, human_preset, human_config, headless, geoip,
                 clipboard_sync, auto_launch, color_scheme, launch_args, notes,
                 proxy_credential_id, is_template, restart_on_crash, max_restarts,
                 proxy_group_id, proxy_assignment,
+                clear_on_launch, storage_state, permissions,
+                device_scale_factor, is_mobile, has_touch, extension_paths,
                 user_data_dir, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 profile_id, name, seed,
                 fields.get("proxy"),
@@ -200,8 +252,20 @@ def create_profile(
                 fields.get("gpu_vendor"),
                 fields.get("gpu_renderer"),
                 fields.get("hardware_concurrency"),
+                fields.get("device_memory"),
+                fields.get("brand"),
+                fields.get("brand_version"),
+                fields.get("platform_version"),
+                fields.get("fonts_dir"),
+                fields.get("storage_quota_mb"),
+                fields.get("taskbar_height"),
+                fields.get("geolocation_lat"),
+                fields.get("geolocation_lon"),
+                fields.get("webrtc_ip"),
+                bool(fields.get("noise_enabled", True)),
                 fields.get("humanize", False),
                 fields.get("human_preset", "default"),
+                json.dumps(fields.get("human_config") or {}) if fields.get("human_config") else None,
                 fields.get("headless", False),
                 fields.get("geoip", False),
                 fields.get("clipboard_sync", True),
@@ -215,6 +279,13 @@ def create_profile(
                 int(fields.get("max_restarts", 5)),
                 fields.get("proxy_group_id"),
                 fields.get("proxy_assignment"),
+                bool(fields.get("clear_on_launch", False)),
+                json.dumps(fields.get("storage_state")) if fields.get("storage_state") else None,
+                json.dumps(fields.get("permissions")) if fields.get("permissions") else None,
+                fields.get("device_scale_factor"),
+                bool(fields.get("is_mobile", False)),
+                bool(fields.get("has_touch", False)),
+                json.dumps(fields.get("extension_paths")) if fields.get("extension_paths") else None,
                 user_data_dir, now, now,
             ),
         )
@@ -228,13 +299,30 @@ def create_profile(
     return get_profile(profile_id)  # type: ignore[return-value]
 
 
+def _deserialize_json_fields(profile_d: dict[str, Any]) -> dict[str, Any]:
+    """Deserialize JSON-stored text columns into Python objects."""
+    _json_cols = (
+        "launch_args", "human_config", "storage_state",
+        "permissions", "extension_paths",
+    )
+    for col in _json_cols:
+        raw = profile_d.get(col)
+        if raw and isinstance(raw, str):
+            try:
+                profile_d[col] = json.loads(raw)
+            except json.JSONDecodeError:
+                profile_d[col] = None if col != "launch_args" else []
+        elif raw is None and col == "launch_args":
+            profile_d[col] = []
+    return profile_d
+
+
 def get_profile(profile_id: str) -> dict[str, Any] | None:
     with get_db() as conn:
         row = conn.execute("SELECT * FROM profiles WHERE id = ?", (profile_id,)).fetchone()
         if not row:
             return None
-        profile = dict(row)
-        profile["launch_args"] = json.loads(profile.get("launch_args") or "[]")
+        profile = _deserialize_json_fields(dict(row))
         tags = conn.execute(
             "SELECT tag, color FROM profile_tags WHERE profile_id = ?",
             (profile_id,),
@@ -248,8 +336,7 @@ def list_profiles() -> list[dict[str, Any]]:
         rows = conn.execute("SELECT * FROM profiles ORDER BY created_at DESC").fetchall()
         profiles = []
         for row in rows:
-            profile = dict(row)
-            profile["launch_args"] = json.loads(profile.get("launch_args") or "[]")
+            profile = _deserialize_json_fields(dict(row))
             tags = conn.execute(
                 "SELECT tag, color FROM profile_tags WHERE profile_id = ?",
                 (profile["id"],),
@@ -276,14 +363,26 @@ def update_profile(profile_id: str, **fields: Any) -> dict[str, Any] | None:
     for col in (
         "name", "fingerprint_seed", "proxy", "timezone", "locale", "platform",
         "user_agent", "screen_width", "screen_height", "gpu_vendor", "gpu_renderer",
-        "hardware_concurrency", "humanize", "human_preset", "headless", "geoip",
+        "hardware_concurrency", "device_memory", "brand", "brand_version",
+        "platform_version", "fonts_dir", "storage_quota_mb", "taskbar_height",
+        "geolocation_lat", "geolocation_lon", "webrtc_ip", "noise_enabled",
+        "humanize", "human_preset", "headless", "geoip",
         "clipboard_sync", "auto_launch", "color_scheme", "launch_args", "notes",
         "proxy_credential_id", "is_template", "restart_on_crash", "max_restarts",
         "proxy_group_id", "proxy_assignment",
+        "clear_on_launch", "device_scale_factor", "is_mobile", "has_touch",
     ):
         if col in fields:
             update_cols.append(f"{col} = ?")
             update_vals.append(fields[col])
+
+    # JSON-serialized columns
+    _json_cols = ("human_config", "storage_state", "permissions", "extension_paths")
+    for jc in _json_cols:
+        raw = fields.pop(jc, None)
+        if raw is not None:
+            update_cols.append(f"{jc} = ?")
+            update_vals.append(json.dumps(raw))
 
     if update_cols:
         update_cols.append("updated_at = ?")
@@ -708,9 +807,14 @@ def next_round_robin_index(group_id: str) -> tuple[int, int]:
 
 _CLONE_FIELDS = (
     "platform", "user_agent", "screen_width", "screen_height", "gpu_vendor",
-    "gpu_renderer", "hardware_concurrency", "humanize", "human_preset",
+    "gpu_renderer", "hardware_concurrency", "device_memory", "brand",
+    "brand_version", "platform_version", "fonts_dir", "storage_quota_mb",
+    "taskbar_height", "geolocation_lat", "geolocation_lon", "webrtc_ip",
+    "noise_enabled", "humanize", "human_preset", "human_config",
     "headless", "geoip", "clipboard_sync", "auto_launch", "color_scheme",
     "launch_args", "notes", "timezone", "locale",
+    "clear_on_launch", "storage_state", "permissions",
+    "device_scale_factor", "is_mobile", "has_touch", "extension_paths",
 )
 
 

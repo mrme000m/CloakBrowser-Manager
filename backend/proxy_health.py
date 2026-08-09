@@ -126,6 +126,41 @@ def _empty_result(error: str) -> dict[str, Any]:
             "timezone": None, "latency_ms": None, "error": error}
 
 
+async def resolve_proxy_country_timezone(proxy_url: str) -> tuple[str | None, str | None, str | None]:
+    """Lightweight proxy geo lookup: return (country, timezone, exit_ip).
+
+    Uses ipify.org for the exit IP and ipapi.co for country/timezone.
+    Returns (None, None, None) on any failure (timeout, DNS, etc.).
+    Does NOT persist results — designed for consistency checks, not health monitoring.
+    """
+    import time as _time
+    start = _time.perf_counter()
+    try:
+        async with httpx.AsyncClient(proxy=proxy_url, timeout=10.0) as client:
+            resp = await client.get("https://api.ipify.org?format=json")
+            resp.raise_for_status()
+            exit_ip = (resp.json() or {}).get("ip")
+    except Exception:
+        return None, None, None
+
+    if not exit_ip:
+        return None, None, None
+
+    country: str | None = None
+    timezone: str | None = None
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            geo = await client.get(f"https://ipapi.co/{exit_ip}/json/")
+            if geo.status_code == 200:
+                g = geo.json() or {}
+                country = g.get("country_name") or g.get("country")
+                timezone = g.get("timezone")
+    except Exception:
+        pass
+
+    return country, timezone, exit_ip
+
+
 async def test_proxy(cred: dict[str, Any]) -> dict[str, Any]:
     """Connect through a proxy to an IP-echo service and report diagnostics.
 

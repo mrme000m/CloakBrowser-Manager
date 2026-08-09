@@ -17,6 +17,7 @@ from cloakbrowser import launch_persistent_context_async
 
 from . import database as db
 from . import proxy_health
+from . import fingerprint_coherence as coherence
 from .vnc_manager import VNCManager
 
 logger = logging.getLogger("cloakbrowser.manager.browser")
@@ -250,6 +251,8 @@ class RunningProfile:
     # Resource-usage bookkeeping (best-effort, via psutil)
     started_at: float = field(default_factory=time.time)
     chrome_pid: int | None = None
+    # Coherence warnings generated at launch time
+    coherence_warnings: list[str] = field(default_factory=list)
 
 
 class BrowserManager:
@@ -317,10 +320,47 @@ class BrowserManager:
             extra_args += profile.get("launch_args") or []
             extra_args.append(f"--remote-debugging-port={cdp_port}")
 
-            # Resolve proxy (explicit field takes priority, then credential)
+            # WebRTC IP: always inject auto when a proxy is set (prevents IP leaks)
             proxy = _resolve_proxy_url(profile)
             if proxy:
                 _validate_proxy(proxy)
+                if not any(a.startswith("--fingerprint-webrtc-ip") for a in extra_args):
+                    extra_args.append("--fingerprint-webrtc-ip=auto")
+
+            # ── Platform-aware viewport ──
+            platform = profile.get("platform", "windows")
+            chrome_ui = coherence.chrome_ui_height(platform)
+            screen_w = profile.get("screen_width", 1920)
+            screen_h = profile.get("screen_height", 1080)
+            viewport_h = max(600, screen_h - chrome_ui)
+
+            # ── Clear-on-launch: wipe cookies, cache, storage ──
+            if profile.get("clear_on_launch"):
+                self._clear_profile_storage(user_data_dir)
+
+            # ── Coherence check ──
+            coherence_warnings = coherence.analyze_profile(profile)
+            if coherence_warnings:
+                for w in coherence_warnings:
+                    logger.warning("Coherence issue for %s: %s", profile["name"], w)
+
+            # ── Build context kwargs (permissions, geolocation, etc.) ──
+            context_extras: dict[str, Any] = {}
+            if profile.get("permissions"):
+                context_extras["permissions"] = profile["permissions"]
+            if profile.get("geolocation_lat") is not None and profile.get("geolocation_lon") is not None:
+                context_extras["geolocation"] = {
+                    "latitude": profile["geolocation_lat"],
+                    "longitude": profile["geolocation_lon"],
+                }
+            if profile.get("device_scale_factor") is not None:
+                context_extras["device_scale_factor"] = profile["device_scale_factor"]
+            if profile.get("is_mobile"):
+                context_extras["is_mobile"] = True
+            if profile.get("has_touch"):
+                context_extras["has_touch"] = True
+            # human_config: expose per-profile overrides
+            human_override = profile.get("human_config") or None
 
             # Launch CloakBrowser on that display
             # DISPLAY is passed via env kwarg to avoid process-wide os.environ mutation
@@ -333,14 +373,17 @@ class BrowserManager:
                 locale=profile.get("locale") or None,
                 humanize=bool(profile.get("humanize", False)),
                 human_preset=profile.get("human_preset", "default"),
+                human_config=human_override,
                 geoip=bool(profile.get("geoip", False)),
                 color_scheme=profile.get("color_scheme") or None,
                 user_agent=profile.get("user_agent") or None,
+                extension_paths=profile.get("extension_paths") or None,
                 viewport={
-                    "width": profile.get("screen_width", 1920),
-                    "height": profile.get("screen_height", 1080) - 133,
+                    "width": screen_w,
+                    "height": viewport_h,
                 },
                 env={**os.environ, "DISPLAY": f":{display}"},
+                **context_extras,
             )
 
             # Inject clipboard listener: captures copied text on every page
@@ -372,6 +415,7 @@ class BrowserManager:
                 display=display,
                 ws_port=ws_port,
                 cdp_port=cdp_port,
+                coherence_warnings=coherence_warnings,
             )
 
             # Auto-cleanup if browser crashes or user closes Chrome via VNC
@@ -457,6 +501,7 @@ class BrowserManager:
                 "effective_timezone": running.effective_timezone,
                 "effective_locale": running.effective_locale,
                 "resources": self.get_resources(profile_id),
+                "coherence_warnings": running.coherence_warnings,
             }
         return {
             "status": "stopped",
@@ -467,6 +512,7 @@ class BrowserManager:
             "effective_timezone": None,
             "effective_locale": None,
             "resources": None,
+            "coherence_warnings": [],
         }
 
     def get_resources(self, profile_id: str) -> dict[str, Any] | None:
@@ -684,6 +730,37 @@ class BrowserManager:
                     continue
         raise ValueError("No free CDP ports available in range %d-%d" % (BASE_CDP_PORT, BASE_CDP_PORT + CDP_PORT_RANGE - 1))
 
+    def _clear_profile_storage(self, user_data_dir: Path) -> None:
+        """Delete cookies, localStorage, cache, history, and service workers.
+
+        Keeps bookmarks, preferences, and extensions so the profile remains
+        functional but appears fresh to anti-bot detection.
+        """
+        paths_to_clear = [
+            "Default/Cookies",
+            "Default/Cookies-journal",
+            "Default/Local Storage",
+            "Default/Session Storage",
+            "Default/Cache",
+            "Default/Code Cache",
+            "Default/Service Worker",
+            "Default/IndexedDB",
+            "Default/History",
+            "Default/History-journal",
+            "Default/WebStorage",
+            "Default/Network",
+            "Default/GPUCache",
+        ]
+        import shutil
+
+        for rel in paths_to_clear:
+            full = user_data_dir / rel
+            if full.is_dir():
+                shutil.rmtree(full, ignore_errors=True)
+                logger.debug("Cleared %s", full)
+            elif full.is_file():
+                full.unlink(missing_ok=True)
+
     def _build_fingerprint_args(self, profile: dict[str, Any]) -> list[str]:
         """Build extra Chromium args from profile fingerprint settings."""
         args: list[str] = [
@@ -698,7 +775,6 @@ class BrowserManager:
 
         p = profile.get("platform")
         if p:
-            # Map our "macos" to binary's "macos"
             args.append(f"--fingerprint-platform={p}")
 
         vendor = profile.get("gpu_vendor")
@@ -719,5 +795,49 @@ class BrowserManager:
             args.append(f"--fingerprint-screen-width={sw}")
         if sh:
             args.append(f"--fingerprint-screen-height={sh}")
+
+        # ── Organic fingerprint flags ──
+
+        dm = profile.get("device_memory")
+        if dm is not None:
+            args.append(f"--fingerprint-device-memory={dm}")
+
+        brand = profile.get("brand")
+        if brand:
+            args.append(f"--fingerprint-brand={brand}")
+
+        bv = profile.get("brand_version")
+        if bv:
+            args.append(f"--fingerprint-brand-version={bv}")
+
+        pv = profile.get("platform_version")
+        if pv:
+            args.append(f"--fingerprint-platform-version={pv}")
+
+        fonts = profile.get("fonts_dir")
+        if fonts:
+            args.append(f"--fingerprint-fonts-dir={fonts}")
+
+        sq = profile.get("storage_quota_mb")
+        if sq is not None:
+            args.append(f"--fingerprint-storage-quota={sq}")
+
+        tb = profile.get("taskbar_height")
+        if tb is not None:
+            args.append(f"--fingerprint-taskbar-height={tb}")
+
+        glat = profile.get("geolocation_lat")
+        glon = profile.get("geolocation_lon")
+        if glat is not None and glon is not None:
+            args.append(f"--fingerprint-location={glat},{glon}")
+
+        webrtc = profile.get("webrtc_ip")
+        if webrtc:
+            args.append(f"--fingerprint-webrtc-ip={webrtc}")
+
+        # noise_enabled=False → --fingerprint-noise=false (stable returning-user identity)
+        noise = profile.get("noise_enabled")
+        if noise is not None and not noise:
+            args.append("--fingerprint-noise=false")
 
         return args

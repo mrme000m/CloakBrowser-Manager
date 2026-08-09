@@ -176,8 +176,20 @@ class ProfileCreate(BaseModel):
     gpu_vendor: str | None = None
     gpu_renderer: str | None = None
     hardware_concurrency: int | None = None
+    device_memory: int | None = None  # GB, must be one of standard Chrome values: 0.25,0.5,1,2,4,8
+    brand: Literal["chrome", "edge", "opera", "vivaldi"] | None = None  # Sec-CH-UA brand
+    brand_version: str | None = None  # e.g. "120.0.6099.109"
+    platform_version: str | None = None  # e.g. "10.0.19045" (Windows) or "13_5_1" (macOS)
+    fonts_dir: str | None = None  # directory with target-platform fonts for font fingerprinting
+    storage_quota_mb: int | None = None  # overrides storage quota reported via Storage APIs
+    taskbar_height: int | None = None  # px, subtracted from availHeight
+    geolocation_lat: float | None = None
+    geolocation_lon: float | None = None
+    webrtc_ip: str | None = None  # "auto" or explicit IP for WebRTC ICE candidates
+    noise_enabled: bool = True  # canvas/WebGL/audio/client-rect noise (set False for stable returning-user identity)
     humanize: bool = False
     human_preset: Literal["default", "careful"] = "default"
+    human_config: dict | None = None  # custom override mapping for typing/mouse/scroll params
     headless: bool = False
     geoip: bool = False
     clipboard_sync: bool = True
@@ -188,6 +200,13 @@ class ProfileCreate(BaseModel):
     is_template: bool = False
     restart_on_crash: bool = False
     max_restarts: int = 5
+    clear_on_launch: bool = False  # wipe cookies/cache/storage before each launch
+    storage_state: dict | None = None  # pre-seeded cookies/localStorage state
+    permissions: list[str] | None = None  # e.g. ["geolocation", "notifications"]
+    device_scale_factor: float | None = None
+    is_mobile: bool = False
+    has_touch: bool = False
+    extension_paths: list[str] | None = None  # Chrome extension paths to load
     tags: list[TagCreate] | None = None
 
 
@@ -206,8 +225,20 @@ class ProfileUpdate(BaseModel):
     gpu_vendor: str | None = Field(default=None)
     gpu_renderer: str | None = Field(default=None)
     hardware_concurrency: int | None = Field(default=None)
+    device_memory: int | None = Field(default=None)
+    brand: Literal["chrome", "edge", "opera", "vivaldi"] | None = Field(default=None)
+    brand_version: str | None = Field(default=None)
+    platform_version: str | None = Field(default=None)
+    fonts_dir: str | None = Field(default=None)
+    storage_quota_mb: int | None = Field(default=None)
+    taskbar_height: int | None = Field(default=None)
+    geolocation_lat: float | None = Field(default=None)
+    geolocation_lon: float | None = Field(default=None)
+    webrtc_ip: str | None = Field(default=None)
+    noise_enabled: bool | None = None
     humanize: bool | None = None
     human_preset: Literal["default", "careful"] | None = None
+    human_config: dict | None = Field(default=None)
     headless: bool | None = None
     geoip: bool | None = None
     clipboard_sync: bool | None = None
@@ -218,6 +249,13 @@ class ProfileUpdate(BaseModel):
     is_template: bool | None = None
     restart_on_crash: bool | None = None
     max_restarts: int | None = None
+    clear_on_launch: bool | None = None
+    storage_state: dict | None = Field(default=None)
+    permissions: list[str] | None = Field(default=None)
+    device_scale_factor: float | None = Field(default=None)
+    is_mobile: bool | None = None
+    has_touch: bool | None = None
+    extension_paths: list[str] | None = Field(default=None)
     tags: list[TagCreate] | None = None
 
 
@@ -239,12 +277,32 @@ class ProfileResponse(BaseModel):
     gpu_vendor: str | None = None
     gpu_renderer: str | None = None
     hardware_concurrency: int | None = None
+    device_memory: int | None = None
+    brand: str | None = None
+    brand_version: str | None = None
+    platform_version: str | None = None
+    fonts_dir: str | None = None
+    storage_quota_mb: int | None = None
+    taskbar_height: int | None = None
+    geolocation_lat: float | None = None
+    geolocation_lon: float | None = None
+    webrtc_ip: str | None = None
+    noise_enabled: bool = True
     humanize: bool = False
     human_preset: str = "default"
+    human_config: dict | None = None
     headless: bool = False
     geoip: bool = False
     clipboard_sync: bool = True
     auto_launch: bool = False
+    clear_on_launch: bool = False
+    storage_state: dict | None = None
+    permissions: list[str] | None = None
+    device_scale_factor: float | None = None
+    is_mobile: bool = False
+    has_touch: bool = False
+    extension_paths: list[str] | None = None
+    coherence_warnings: list[str] = []
 
     @field_validator("clipboard_sync", mode="before")
     @classmethod
@@ -310,6 +368,7 @@ class ProfileStatusResponse(BaseModel):
     effective_timezone: str | None = None
     effective_locale: str | None = None
     resources: ProfileResources | None = None
+    coherence_warnings: list[str] = []
 
 
 # ── Clone / Bulk ────────────────────────────────────────────────────────────

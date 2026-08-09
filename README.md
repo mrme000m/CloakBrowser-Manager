@@ -105,7 +105,89 @@ docker compose up --build
 - ~2 GB disk (image + binary)
 - ~512 MB RAM per running profile
 
-## Updating
+## Organic Profiles (Anti-Detection)
+
+Each profile can be tuned for **maximum coherence** — every fingerprint signal is internally consistent so anti-bot systems (FingerprintJS, CreepJS, BrowserScan, Pixelscan, reCAPTCHA v3, Cloudflare Turnstile) cannot flag it as automated.
+
+### Quick Start: Create a clean Windows profile
+
+```bash
+# CLI
+cbpm profiles create \
+  --name "shop-us" \
+  --platform windows \
+  --geoip true \
+  --humanize true \
+  --webrtc-ip auto \
+  --device-memory 8 \
+  --brand chrome \
+  --brand-version 120.0.6099.109 \
+  --platform-version 10.0.19045
+```
+
+Then launch and visit the bookmarked detection sites to verify.
+
+### Key organic-fingerprint fields
+
+| Field | Purpose | Recommended |
+|---|---|---|
+| `--geoip` | Auto-match timezone + locale to proxy IP | Always enable with a proxy |
+| `--webrtc-ip auto` | Spoof WebRTC ICE candidates to proxy IP | Always when using a proxy |
+| `--noise-enabled false` | Disable canvas/WebGL noise (stable identity) | For returning-user profiles |
+| `--device-memory 8` | Set `navigator.deviceMemory` | Match platform norms |
+| `--brand chrome` | Sec-CH-UA browser brand | Chrome on all platforms |
+| `--brand-version` | Sec-CH-UA version | Match Chromium binary |
+| `--platform-version` | Sec-CH-UA-Platform-Version | Win: `10.0.19045`, Mac: `13_5_1` |
+| `--fonts-dir` | Custom font directory | Required for Windows-spoofing on Linux |
+| `--clear-on-launch` | Wipe cookies/cache each launch | For fresh-session profiles |
+| `--geolocation-lat/lon` | Consistent geolocation | Match IP location |
+| `--storage-quota` | Override storage quota | Match device class |
+| `--taskbar-height` | Adjust availHeight | Windows: 40, macOS: 23 |
+
+### Platform consistency guide
+
+**Windows profile:**
+- GPU: ANGLE with Direct3D11 (NVIDIA RTX / AMD RX)
+- UA: contains `Windows NT`
+- platformVersion: `10.0.19045`
+- Chrome UI offset: 133px
+
+**macOS profile:**
+- GPU: ANGLE Metal (Apple M-series)
+- UA: contains `Macintosh`
+- platformVersion: `13_5_1`
+- Chrome UI offset: 91px
+
+**Linux profile:**
+- GPU: ANGLE Vulkan/OpenGL
+- UA: contains `Linux`
+- Chrome UI offset: 80px
+
+The coherence engine validates these automatically and surfaces warnings in the UI.
+
+### Detection-Test Workflow
+
+1. Create a profile with recommended settings.
+2. Launch the browser.
+3. Open the "Detection Tests" bookmark folder (auto-created) and visit:
+   - [Rebrowser Bot Detector](https://bot-detector.rebrowser.net/)
+   - [Incolumitas](https://bot.incolumitas.com/)
+   - [BrowserScan Bot](https://www.browserscan.net/bot-detection)
+   - [Pixelscan](https://pixelscan.net/fingerprint-check)
+   - [CreepJS](https://abrahamjuliot.github.io/creepjs/)
+4. If any test flags your profile, check the Coherence Warnings section in the profile editor for mismatches.
+5. Adjust fields and re-test.
+
+### Automated Analysis API
+
+```bash
+# Run a one-shot detection test against bot.sannysoft.com
+curl -X POST http://localhost:8080/api/profiles/<id>/analyze
+```
+
+Returns per-test pass/fail results and coherence warnings.
+
+
 
 Pull the latest image and restart:
 

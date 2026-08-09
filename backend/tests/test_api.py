@@ -137,6 +137,7 @@ def test_delete_profile_stops_running(app_client: TestClient):
     mock_running.display = 100
     mock_running.ws_port = 6100
     mock_running.cdp_port = 5100
+    mock_running.coherence_warnings = []
     main.browser_mgr.running[pid] = mock_running
     main.browser_mgr.stop = AsyncMock()
 
@@ -173,7 +174,8 @@ def test_launch_already_running(app_client: TestClient):
     create = app_client.post("/api/profiles", json={"name": "Running"})
     pid = create.json()["id"]
     # Inject into running dict
-    main.browser_mgr.running[pid] = MagicMock(spec=RunningProfile)
+    main.browser_mgr.running[pid] = mock_running = MagicMock(spec=RunningProfile)
+    mock_running.coherence_warnings = []  # type: ignore[attr-defined]
     resp = app_client.post(f"/api/profiles/{pid}/launch")
     assert resp.status_code == 409
     # Cleanup
@@ -303,6 +305,7 @@ def test_set_clipboard_success(app_client: TestClient):
     mock_running = MagicMock(spec=RunningProfile)
     mock_running.display = 100
     mock_running.cdp_port = 5100
+    mock_running.coherence_warnings = []
     main.browser_mgr.running[pid] = mock_running
 
     # Mock asyncio.create_subprocess_exec to avoid actual xclip
@@ -337,6 +340,7 @@ def test_get_clipboard_from_page(app_client: TestClient):
     mock_running = MagicMock(spec=RunningProfile)
     mock_running.display = 100
     mock_running.cdp_port = 5100
+    mock_running.coherence_warnings = []
     mock_running.context = mock_context
     main.browser_mgr.running[pid] = mock_running
 
@@ -388,6 +392,7 @@ def test_running_profile_has_cdp_url(app_client: TestClient):
     mock_running.ws_port = 6100
     mock_running.cdp_port = 5100
     mock_running.profile_id = pid
+    mock_running.coherence_warnings = []
     main.browser_mgr.running[pid] = mock_running
 
     resp = app_client.get(f"/api/profiles/{pid}")
@@ -419,6 +424,7 @@ def _mock_running_profile(pid: str) -> MagicMock:
     mock.ws_port = 6100
     mock.cdp_port = 5100
     mock.profile_id = pid
+    mock.coherence_warnings = []
     main.browser_mgr.running[pid] = mock
     return mock
 

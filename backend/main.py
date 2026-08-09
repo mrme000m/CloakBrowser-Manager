@@ -27,6 +27,7 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 
 from . import database as db
 from . import proxy_health
+from . import fingerprint_coherence as coherence
 from .browser_manager import BrowserManager
 from .models import (
     BulkIdsRequest,
@@ -352,16 +353,22 @@ def _cdp_endpoint(profile_id: str, scope: Scope) -> str:
 
 
 def _enrich_profile(profile: dict, scope: Scope) -> ProfileResponse:
-    """Add runtime fields (status, proxy_credential, proxy_group, cdp_endpoint)."""
+    """Add runtime fields (status, proxy_credential, proxy_group, cdp_endpoint, coherence)."""
     profile_id = profile["id"]
     status = browser_mgr.get_status(profile_id)
     proxy_cred = _resolve_proxy_credential(profile)
     proxy_group = _resolve_proxy_group(profile)
     profile_tags = profile.get("tags", [])
+
+    # Coherence: merge launch-time warnings with static analysis
+    runtime_warnings: list[str] = list(status.get("coherence_warnings") or [])
+    static_warnings = coherence.analyze_profile(profile)
+    coherence_warnings: list[str] = list(dict.fromkeys(runtime_warnings + static_warnings))
+
     # Filter dict-only/internal keys to avoid duplicate/unexpected kwargs.
     profile_fields = {
         k: v for k, v in profile.items()
-        if k not in ("tags", "proxy_assignment")
+        if k not in ("tags", "proxy_assignment", "coherence_warnings")
     }
     return ProfileResponse(
         **profile_fields,
@@ -373,6 +380,7 @@ def _enrich_profile(profile: dict, scope: Scope) -> ProfileResponse:
         proxy_group=proxy_group.model_dump() if proxy_group else None,
         tags=[TagResponse(**t) for t in profile_tags],
         resources=status.get("resources"),
+        coherence_warnings=coherence_warnings,
     )
 
 
@@ -838,6 +846,105 @@ async def clone_profile(profile_id: str, body: CloneRequest, request: Request):
     if not cloned:
         raise HTTPException(status_code=404, detail="Profile not found")
     return _enrich_profile(cloned, request.scope)
+
+
+@app.post("/api/profiles/{profile_id}/storage-state")
+async def upload_storage_state(profile_id: str, body: dict, request: Request):
+    """Upload a Playwright storage_state dict (cookies, localStorage, origins).
+
+    Stored on the profile as JSON; applied on the next launch when
+    clear_on_launch is enabled (clear first, then restore this state).
+    """
+    profile = db.get_profile(profile_id)
+    if not profile:
+        raise HTTPException(status_code=404, detail="Profile not found")
+
+    # Validate that it looks like a storage_state
+    if not isinstance(body, dict) or ("cookies" not in body and "origins" not in body):
+        raise HTTPException(status_code=400, detail="Body must be a Playwright storage_state dict with 'cookies' or 'origins'.")
+
+    updated = db.update_profile(profile_id, storage_state=body)
+    if not updated:
+        raise HTTPException(status_code=404, detail="Profile not found")
+    return {"ok": True, "cookies_count": len(body.get("cookies", [])),
+            "origins_count": len(body.get("origins", []))}
+
+
+@app.post("/api/profiles/{profile_id}/analyze")
+async def analyze_detection(profile_id: str, request: Request):
+    """Run a one-shot detection test by navigating a headless browser
+    to a bot-detection page and extracting the result.
+
+    Returns a detection report with pass/fail and raw text.
+    """
+    import asyncio as _asyncio
+    profile_raw = db.get_profile(profile_id)
+    if not profile_raw:
+        raise HTTPException(status_code=404, detail="Profile not found")
+    if profile_raw.get("is_template"):
+        raise HTTPException(status_code=409, detail="Templates cannot be analyzed")
+
+    # Build a minimal profile dict for a one-shot headless launch
+    test_profile: dict[str, Any] = dict(profile_raw)
+    test_profile["headless"] = True
+    # Use a temp dir to avoid polluting the real profile
+    import tempfile
+    tmp_dir = tempfile.mkdtemp(prefix=f"cb-analyze-{profile_id[:8]}-")
+    test_profile["user_data_dir"] = tmp_dir
+    test_profile["clear_on_launch"] = False
+    test_profile["auto_launch"] = False
+    test_profile["restart_on_crash"] = False
+
+    try:
+        running = await _asyncio.wait_for(browser_mgr.launch(test_profile), timeout=60)
+    except Exception as exc:
+        import shutil
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        raise HTTPException(status_code=500, detail=f"Launch failed: {exc}")
+
+    try:
+        page = running.context.pages[0] if running.context.pages else await running.context.new_page()
+
+        # Navigate to a bot-detection page
+        await page.goto("https://bot.sannysoft.com/", timeout=30, wait_until="networkidle")
+        await _asyncio.sleep(3)  # let JS evaluation complete
+
+        result_text = await page.evaluate("""() => {
+            const els = document.querySelectorAll('table tr');
+            const rows = [];
+            els.forEach((el) => {
+                const cells = el.querySelectorAll('td, th');
+                if (cells.length >= 2) {
+                    rows.push({test: cells[0].textContent.trim(), result: cells[1].textContent.trim()});
+                }
+            });
+            return JSON.stringify(rows);
+        }""")
+
+        import json as _json
+        rows = _json.loads(result_text) if isinstance(result_text, str) else []
+
+        failed = [r for r in rows if "false" in (r.get("result", "")).lower() or "missing" in (r.get("result", "")).lower()]
+        passed = [r for r in rows if r not in failed]
+
+        return {
+            "profile_id": profile_id,
+            "passed": len(passed),
+            "failed": len(failed),
+            "details": rows,
+            "coherence_warnings": running.coherence_warnings,
+        }
+    except Exception as exc:
+        return {
+            "profile_id": profile_id,
+            "error": str(exc),
+            "details": [],
+            "coherence_warnings": running.coherence_warnings,
+        }
+    finally:
+        import shutil
+        await browser_mgr.stop(profile_id)
+        shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
 @app.post("/api/profiles/{profile_id}/reseed", response_model=ProfileResponse)

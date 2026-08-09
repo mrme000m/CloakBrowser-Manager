@@ -73,6 +73,10 @@ export function ProfileForm({ profile, proxyCredentials, proxyGroups, onSave, on
     is_template: false,
     restart_on_crash: false,
     max_restarts: 5,
+    noise_enabled: true,
+    clear_on_launch: false,
+    is_mobile: false,
+    has_touch: false,
   });
 
   const [proxyMode, setProxyMode] = useState<"none" | "credential" | "group" | "custom">("none");
@@ -100,12 +104,31 @@ export function ProfileForm({ profile, proxyCredentials, proxyGroups, onSave, on
         gpu_vendor: profile.gpu_vendor,
         gpu_renderer: profile.gpu_renderer,
         hardware_concurrency: profile.hardware_concurrency,
+        device_memory: profile.device_memory,
+        brand: profile.brand,
+        brand_version: profile.brand_version,
+        platform_version: profile.platform_version,
+        fonts_dir: profile.fonts_dir,
+        storage_quota_mb: profile.storage_quota_mb,
+        taskbar_height: profile.taskbar_height,
+        geolocation_lat: profile.geolocation_lat,
+        geolocation_lon: profile.geolocation_lon,
+        webrtc_ip: profile.webrtc_ip,
+        noise_enabled: profile.noise_enabled,
         humanize: profile.humanize,
         human_preset: profile.human_preset,
+        human_config: profile.human_config,
         headless: profile.headless,
         geoip: profile.geoip,
         clipboard_sync: profile.clipboard_sync,
         auto_launch: profile.auto_launch,
+        clear_on_launch: profile.clear_on_launch,
+        storage_state: profile.storage_state,
+        permissions: profile.permissions,
+        device_scale_factor: profile.device_scale_factor,
+        is_mobile: profile.is_mobile,
+        has_touch: profile.has_touch,
+        extension_paths: profile.extension_paths,
         color_scheme: profile.color_scheme,
         launch_args: profile.launch_args ?? [],
         notes: profile.notes,
@@ -159,6 +182,15 @@ export function ProfileForm({ profile, proxyCredentials, proxyGroups, onSave, on
       set("gpu_renderer", preset.renderer);
     }
   };
+
+  const filteredGpuPresets = Object.entries(GPU_PRESETS).filter(([, preset]) => {
+    const r = preset.renderer.toLowerCase();
+    const p = (form.platform || "windows").toLowerCase();
+    if (p === "macos" && r.includes("metal")) return true;
+    if (p === "windows" && r.includes("d3d11")) return true;
+    if (p === "linux" && (r.includes("vulkan") || r.includes("opengl"))) return true;
+    return false;
+  });
 
   const randomizeSeed = () => {
     set("fingerprint_seed", Math.floor(Math.random() * 90000) + 10000);
@@ -470,18 +502,23 @@ export function ProfileForm({ profile, proxyCredentials, proxyGroups, onSave, on
             </div>
             <div>
               <label className="label">GPU Preset</label>
-              <select
-                className="input"
-                value=""
-                onChange={(e) => {
-                  if (e.target.value) applyGpuPreset(e.target.value);
-                }}
-              >
-                <option value="">Select preset...</option>
-                {Object.keys(GPU_PRESETS).map((name) => (
-                  <option key={name} value={name}>{name}</option>
-                ))}
-              </select>
+                <select
+                  className="input"
+                  value=""
+                  onChange={(e) => {
+                    if (e.target.value) applyGpuPreset(e.target.value);
+                  }}
+                >
+                  <option value="">Select preset...</option>
+                  {filteredGpuPresets.length > 0
+                    ? filteredGpuPresets.map(([name]) => (
+                        <option key={name} value={name}>{name}</option>
+                      ))
+                    : Object.keys(GPU_PRESETS).map((name) => (
+                        <option key={name} value={name}>{name}</option>
+                      ))
+                  }
+                </select>
             </div>
             <div>
               <label className="label">GPU Vendor</label>
@@ -500,6 +537,157 @@ export function ProfileForm({ profile, proxyCredentials, proxyGroups, onSave, on
                 onChange={(e) => set("gpu_renderer", e.target.value || null)}
                 placeholder="Auto (from seed)"
               />
+            </div>
+          </div>
+        </section>
+
+        {/* Organic Fingerprint */}
+        <section>
+          <h3 className="text-xs font-semibold text-accent uppercase tracking-wider mb-4">Organic Fingerprint</h3>
+          <div className="space-y-3">
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <label className="label">Device Memory (GB)</label>
+                <select
+                  className="input"
+                  value={form.device_memory ?? ""}
+                  onChange={(e) => set("device_memory", e.target.value ? Number(e.target.value) : null)}
+                >
+                  <option value="">Auto (from seed)</option>
+                  {[0.25, 0.5, 1, 2, 4, 8, 16, 32].map((v) => (
+                    <option key={v} value={v}>{v} GB</option>
+                  ))}
+                </select>
+              </div>
+              <div>
+                <label className="label">Storage Quota (MB)</label>
+                <input
+                  className="input"
+                  type="number"
+                  value={form.storage_quota_mb ?? ""}
+                  onChange={(e) => set("storage_quota_mb", e.target.value ? Number(e.target.value) : null)}
+                  placeholder="Auto"
+                />
+              </div>
+            </div>
+            <div>
+              <label className="label">Fonts Directory</label>
+              <input
+                className="input"
+                value={form.fonts_dir ?? ""}
+                onChange={(e) => set("fonts_dir", e.target.value || null)}
+                placeholder="/data/fonts/win10"
+              />
+              <p className="text-[10px] text-gray-500 mt-1">
+                Required for Windows-spoofing on Linux. Install Windows fonts with <code>ttf-mscorefonts-installer</code>.
+              </p>
+            </div>
+            <div>
+              <label className="label">Taskbar Height (px)</label>
+              <input
+                className="input no-spin"
+                type="number"
+                value={form.taskbar_height ?? ""}
+                onChange={(e) => set("taskbar_height", e.target.value ? Number(e.target.value) : null)}
+                placeholder="Platform default (Windows 40, macOS 23)"
+              />
+            </div>
+          </div>
+        </section>
+
+        {/* Client Hints */}
+        <section>
+          <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-4">Client Hints (Sec-CH-UA)</h3>
+          <div className="space-y-3">
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <label className="label">Brand</label>
+                <select
+                  className="input"
+                  value={form.brand ?? ""}
+                  onChange={(e) => set("brand", e.target.value || null)}
+                >
+                  <option value="">Auto</option>
+                  <option value="chrome">Chrome</option>
+                  <option value="edge">Edge</option>
+                  <option value="opera">Opera</option>
+                  <option value="vivaldi">Vivaldi</option>
+                </select>
+              </div>
+              <div>
+                <label className="label">Brand Version</label>
+                <input
+                  className="input"
+                  value={form.brand_version ?? ""}
+                  onChange={(e) => set("brand_version", e.target.value || null)}
+                  placeholder="e.g. 120.0.6099.109"
+                />
+              </div>
+            </div>
+            <div>
+              <label className="label">Platform Version</label>
+              <input
+                className="input"
+                value={form.platform_version ?? ""}
+                onChange={(e) => set("platform_version", e.target.value || null)}
+                placeholder={form.platform === "macos" ? "e.g. 13_5_1" : "e.g. 10.0.19045"}
+              />
+            </div>
+          </div>
+        </section>
+
+        {/* WebRTC & Geolocation */}
+        <section>
+          <h3 className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-4">WebRTC &amp; Geolocation</h3>
+          <div className="space-y-3">
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <label className="label">WebRTC IP Override</label>
+                <select
+                  className="input"
+                  value={form.webrtc_ip ?? ""}
+                  onChange={(e) => set("webrtc_ip", e.target.value || null)}
+                >
+                  <option value="">Auto (from proxy if geoip)</option>
+                  <option value="auto">Auto (always match proxy)</option>
+                  <option value="disabled">Disable WebRTC completely</option>
+                </select>
+              </div>
+              <div>
+                <label className="label">Fingerprint Noise</label>
+                <select
+                  className="input"
+                  value={form.noise_enabled ? "on" : "off"}
+                  onChange={(e) => set("noise_enabled", e.target.value === "on")}
+                >
+                  <option value="on">Enabled (unique per seed)</option>
+                  <option value="off">Disabled (stable returning-user identity)</option>
+                </select>
+              </div>
+            </div>
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <label className="label">Latitude</label>
+                <input
+                  className="input"
+                  type="number"
+                  step="any"
+                  value={form.geolocation_lat ?? ""}
+                  onChange={(e) => set("geolocation_lat", e.target.value ? Number(e.target.value) : null)}
+                  placeholder="e.g. 40.7128"
+                />
+              </div>
+              <div>
+                <label className="label">Longitude</label>
+                <input
+                  className="input"
+                  type="number"
+                  step="any"
+                  value={form.geolocation_lon ?? ""}
+                  onChange={(e) => set("geolocation_lon", e.target.value ? Number(e.target.value) : null)}
+                  placeholder="e.g. -74.0060"
+                />
+              </div>
             </div>
           </div>
         </section>
@@ -634,6 +822,89 @@ export function ProfileForm({ profile, proxyCredentials, proxyGroups, onSave, on
             </div>
           </div>
         </section>
+
+        {/* Session Hygiene */}
+        <section>
+          <h3 className="text-xs font-semibold text-accent uppercase tracking-wider mb-4">Session Hygiene</h3>
+          <div className="space-y-3">
+            <label className="flex items-center gap-2 text-sm text-gray-300 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={form.clear_on_launch ?? false}
+                onChange={(e) => set("clear_on_launch", e.target.checked)}
+                className="rounded border-border bg-surface-2"
+              />
+              Clear cookies, cache, and storage on every launch
+            </label>
+            <div className="grid grid-cols-3 gap-4">
+              <div>
+                <label className="label">Device Scale Factor</label>
+                <input
+                  className="input"
+                  type="number"
+                  step="0.25"
+                  min={0.5}
+                  max={3}
+                  value={form.device_scale_factor ?? ""}
+                  onChange={(e) => set("device_scale_factor", e.target.value ? Number(e.target.value) : null)}
+                  placeholder="1.0"
+                />
+              </div>
+              <div className="flex items-end pb-2">
+                <label className="flex items-center gap-2 text-sm text-gray-300 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={form.is_mobile ?? false}
+                    onChange={(e) => set("is_mobile", e.target.checked)}
+                    className="rounded border-border bg-surface-2"
+                  />
+                  Is Mobile
+                </label>
+              </div>
+              <div className="flex items-end pb-2">
+                <label className="flex items-center gap-2 text-sm text-gray-300 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={form.has_touch ?? false}
+                    onChange={(e) => set("has_touch", e.target.checked)}
+                    className="rounded border-border bg-surface-2"
+                  />
+                  Has Touch
+                </label>
+              </div>
+            </div>
+            <div>
+              <label className="label">Extension Paths</label>
+              <input
+                className="input font-mono"
+                value={(form.extension_paths ?? []).join(", ")}
+                onChange={(e) => {
+                  const vals = e.target.value.split(",").map((s) => s.trim()).filter(Boolean);
+                  set("extension_paths", vals.length > 0 ? vals : null);
+                }}
+                placeholder="/data/extensions/ublock, /data/extensions/proxy-switcher"
+              />
+              <p className="text-[10px] text-gray-500 mt-1">Comma-separated absolute paths.</p>
+            </div>
+          </div>
+        </section>
+
+        {/* Coherence Warnings */}
+        {isEdit && profile.coherence_warnings && profile.coherence_warnings.length > 0 && (
+          <section>
+            <h3 className="text-xs font-semibold text-amber-400 uppercase tracking-wider mb-4">
+              Coherence Warnings ({profile.coherence_warnings.length})
+            </h3>
+            <div className="bg-amber-400/5 border border-amber-400/20 rounded p-3 space-y-2">
+              {profile.coherence_warnings.map((w, i) => (
+                <div key={i} className="flex items-start gap-2 text-sm text-amber-200/80">
+                  <span className="text-amber-400 mt-0.5 shrink-0">⚠</span>
+                  <span>{w}</span>
+                </div>
+              ))}
+            </div>
+          </section>
+        )}
 
         {/* Tags */}
         <section>
