@@ -30,23 +30,23 @@ signals. A single mismatch will flag you.
 
 ### CLI template
 
+The recommended approach is a **device persona** — a coherent real-world
+machine — plus GeoIP. Leave `brand_version` and `user_agent` unset so they are
+derived from the CloakBrowser binary's Chromium version and never disagree.
+
 ```bash
+# List coherent personas
+cbpm profiles personas
+
 cbpm profiles create \
   --name "organic-windows-us" \
-  --platform windows \
-  --gpu-vendor "Google Inc. (NVIDIA)" \
-  --gpu-renderer "ANGLE (NVIDIA, NVIDIA GeForce RTX 3070 (0x00002484) Direct3D11 vs_5_0 ps_5_0, D3D11)" \
-  --hardware-concurrency 8 \
-  --device-memory 8 \
+  --persona win11-rtx3070-desktop \
   --timezone America/New_York \
   --locale en-US \
   --geoip true \
   --webrtc-ip auto \
   --geolocation-lat 40.7128 \
   --geolocation-lon -74.0060 \
-  --brand chrome \
-  --brand-version 120.0.6099.109 \
-  --platform-version 10.0.19045 \
   --noise-enabled true \
   --humanize true \
   --human-preset careful \
@@ -58,17 +58,11 @@ cbpm profiles create \
 ```bash
 cbpm profiles create \
   --name "organic-macos" \
-  --platform macos \
-  --gpu-vendor "Google Inc. (Apple)" \
-  --gpu-renderer "ANGLE (Apple, ANGLE Metal Renderer: Apple M3, Unspecified Version)" \
-  --hardware-concurrency 10 \
-  --device-memory 16 \
+  --persona mac-mbp-m2-14 \
   --timezone America/Los_Angeles \
   --locale en-US \
   --geoip true \
-  --webrtc-ip auto \
-  --brand chrome \
-  --platform-version 13_5_1
+  --webrtc-ip auto
 ```
 
 ## Field Reference
@@ -91,17 +85,21 @@ cbpm profiles create \
 
 ### Hardware signals
 
-- **hardware_concurrency** — `navigator.hardwareConcurrency`. Windows: 4–16, macOS: 8–20, Linux: 2–16.
-- **device_memory** — `navigator.deviceMemory`. Must be a standard Chrome value (0.25, 0.5, 1, 2, 4, 8). Use 8 for modern desktops.
-- **screen_width/height** — Must match common desktop ratios (16:9, 16:10). 1920×1080 is the safest default.
-- **taskbar_height** — Subtracted from availHeight. 40 (Windows), 23 (macOS).
-- **device_scale_factor** — Pixel ratio. 1.0 for standard desktops, 2.0 for Retina/HiDPI.
+- **hardware_concurrency** — `navigator.hardwareConcurrency`. Common real values: 4, 6, 8, 10, 12, 16, 20, 24. Odd/huge values are suspicious. Set by the persona.
+- **device_memory** — `navigator.deviceMemory`. Real Chrome only reports **0.25, 0.5, 1, 2, 4, 8** and is capped at 8 (even on 64 GB machines). Values > 8 are impossible and a bot signal; the manager rejects them on create/update.
+- **screen_width/height** — Must match common desktop ratios (16:9, 16:10). Set by the persona so a fleet is diverse, not all 1920×1080.
+- **taskbar_height** — Subtracted from availHeight. 40 (Windows), 23 (macOS). Set by the persona.
+- **device_scale_factor** — Pixel ratio. macOS Retina = 2.0; Windows 4K = 1.5; standard = 1.0. Set by the persona.
 
 ### Client Hints (Sec-CH-UA)
 
-- **brand** — Browser brand in Client Hints headers. Chrome, Edge, Opera, Vivaldi.
-- **brand_version** — Should match the Chromium version.
-- **platform_version** — OS version string.
+- **brand** — Browser brand in Client Hints headers. `chrome` on all platforms.
+- **brand_version** — **Leave unset** so it is derived from the CloakBrowser binary's Chromium version. A UA reporting `Chrome/146` while Sec-CH-UA says `v="120"` is a guaranteed fail.
+- **platform_version** — OS version string. Set by the persona (Win `10.0.19045`, macOS `14_3`).
+
+### Device personas
+
+Use `--persona <name>` to apply a coherent bundle (screen + GPU + cores + memory + DPR + platform version + taskbar) in one step. A fleet built from *different* personas is diverse but each profile is internally consistent; building everything as `1920×1080 + RTX 3070` lets anti-bot systems cluster your profiles. Any field you pass explicitly overrides the persona for that one field. Run `cbpm profiles personas` for the list.
 
 ### Session Hygiene
 
@@ -138,11 +136,18 @@ Visit each and ensure no red flags.
 ### Automated analysis
 
 ```bash
-# Run automated detection test (headless, non-persistent)
+# Launch a one-shot headless run and verify the LIVE fingerprint against the
+# profile — reads the actual navigator/WebGL/screen/timezone/voices/WebRTC
+# values from the page and compares them to the profile (not a scraper).
 curl -X POST http://localhost:8080/api/profiles/<profile-id>/analyze
+# CLI:
+cbpm profiles analyze <profile-id>
 ```
 
-Returns pass/fail per test with coherence warnings.
+Returns per-signal pass/fail/warn: UA↔Sec-CH-UA version, UA↔CloakBrowser binary,
+WebGL renderer↔platform, `deviceMemory ≤ 8`, timezone↔locale, screen chain,
+devicePixelRatio, speechSynthesis voices, platform fonts, WebRTC IP leak —
+plus coherence warnings.
 
 ### Coherence Warnings
 
@@ -155,12 +160,16 @@ Common warnings and fixes:
 
 | Warning | Fix |
 |---------|-----|
-| GPU renderer doesn't match platform | Switch GPU preset or platform |
-| User-Agent missing platform fragment | Reset UA (POST /reseed) or set explicitly |
-| Timezone/locale region mismatch | Enable geoip or manually align |
-| Proxy country != locale | Enable geoip or set locale manually |
-| Device memory not standard Chrome value | Use 0.25, 0.5, 1, 2, 4, 8, 16, or 32 |
-| Platform version format wrong | Use `10.0.19045` for Windows, `13_5_1` for macOS |
+| UA Chrome/major ≠ Sec-CH-UA brand version | Leave `brand_version` unset (derived from binary) |
+| UA ≠ CloakBrowser binary version | Leave `user_agent` unset |
+| GPU renderer doesn't match platform | Use a matching persona or GPU preset |
+| User-Agent missing platform fragment | Reset UA (POST /reset-ua) or set explicitly |
+| Timezone/locale region mismatch (country-level) | Enable geoip or manually align |
+| Proxy country != timezone/locale | Enable geoip or set locale manually |
+| Device memory not a real Chrome value | Use 0.25/0.5/1/2/4/8 (capped at 8) |
+| Platform version format wrong | Win `10.0.19045`, macOS `14_3` — or use a persona |
+| Spoofing Windows/macOS on Linux without fonts_dir | Set `--fonts-dir` to a real platform font pack |
+| Software GL (SwiftShader) ≠ spoofed GPU | Expected in the GPU-less container; note the tradeoff |
 
 ## Common Issues
 
@@ -197,8 +206,10 @@ reCAPTCHA v3 scores reflect behavioral trust over time. To improve:
 | Endpoint | Purpose |
 |----------|---------|
 | `GET /api/profiles/{id}` | View profile with coherence_warnings |
-| `POST /api/profiles/{id}/reseed` | Generate new random fingerprint seed |
-| `POST /api/profiles/{id}/reset-ua` | Clear explicit User-Agent |
+| `GET /api/personas` | List coherent device personas |
+| `POST /api/profiles/{id}/reseed` | Generate a new full-entropy fingerprint seed |
+| `POST /api/profiles/{id}/rotate-identity` | New seed + re-apply the persona's hardware bundle |
+| `POST /api/profiles/{id}/reset-ua` | Clear explicit User-Agent (regenerate from binary) |
 | `POST /api/profiles/{id}/storage-state` | Upload Playwright storage_state |
-| `POST /api/profiles/{id}/analyze` | Run automated detection test |
+| `POST /api/profiles/{id}/analyze` | Live in-page fingerprint verification |
 | `GET /api/proxy-credentials/{id}/test` | Test proxy health (exit IP, country, timezone) |

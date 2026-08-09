@@ -18,7 +18,7 @@ import {
 } from "../format.js";
 import { runCommand, parseIds } from "../runner.js";
 import { PROFILE_FIELDS, listFields, findField, suggestFields } from "../schema.js";
-import type { Profile } from "../types.js";
+import type { DetectionReport, Persona, Profile } from "../types.js";
 
 function camel(s: string): string {
   return s.replace(/_([a-z])/g, (_, c) => c.toUpperCase());
@@ -40,6 +40,8 @@ function applyProfileOptions(cmd: Command): void {
       cmd.option(f.flag, f.description);
     } else if (f.type === "int") {
       cmd.option(`${f.flag} <n>`, f.description, (v: string) => parseInt(v, 10));
+    } else if (f.type === "float") {
+      cmd.option(`${f.flag} <n>`, f.description, (v: string) => parseFloat(v));
     } else if (f.type === "list[string]") {
       cmd.option(`${f.flag} <v>`, `${f.description} (repeatable)`, collect, [] as string[]);
     } else if (f.type.startsWith("enum:")) {
@@ -279,6 +281,86 @@ export function registerProfilesCommand(program: Command): void {
         async () => ({ success: true, data: await api.cloneProfile(id, options.name) }),
         options,
         (p: Profile) => `${formatProfile(p)}\n\nCloned from ${id}`,
+      );
+    });
+
+  // ── reseed / rotate-identity / reset-ua ────────────────────────────────
+  profiles
+    .command("reseed <id>")
+    .description("Generate a new full-entropy fingerprint seed (new canvas/audio/etc, same hardware)")
+    .option("-j, --json", "Output as JSON", false)
+    .action(async (id: string, options: { json?: boolean }) => {
+      await runCommand(
+        async () => ({ success: true, data: await api.reseedProfile(id) }),
+        options,
+        (p: Profile) => `Reseeded ${p.name}: new seed ${p.fingerprint_seed}. Effective on next launch.`,
+      );
+    });
+
+  profiles
+    .command("rotate-identity <id>")
+    .description("Generate a fresh coherent identity: new seed + re-apply the persona's hardware bundle")
+    .option("-j, --json", "Output as JSON", false)
+    .action(async (id: string, options: { json?: boolean }) => {
+      await runCommand(
+        async () => ({ success: true, data: await api.rotateIdentity(id) }),
+        options,
+        (p: Profile) => `Rotated identity for ${p.name}: new seed ${p.fingerprint_seed}${p.persona ? ` (persona: ${p.persona})` : ""}. Effective on next launch.`,
+      );
+    });
+
+  profiles
+    .command("reset-ua <id>")
+    .description("Clear the explicit User-Agent override so it is regenerated from the binary")
+    .option("-j, --json", "Output as JSON", false)
+    .action(async (id: string, options: { json?: boolean }) => {
+      await runCommand(
+        async () => ({ success: true, data: await api.resetUserAgent(id) }),
+        options,
+        () => `Cleared user-agent override for ${id}.`,
+      );
+    });
+
+  // ── personas ───────────────────────────────────────────────────────────
+  profiles
+    .command("personas")
+    .description("List the coherent device personas usable with --persona")
+    .option("-j, --json", "Output as JSON", false)
+    .action(async (options: { json?: boolean }) => {
+      await runCommand(
+        async () => ({ success: true, data: await api.listPersonas() }),
+        options,
+        (list: Persona[]) => {
+          const rows = list.map((p) => `  ${pad(p.name, 28)}  ${p.platform.padEnd(7)}  ${p.label}`);
+          return ["Available personas (use with `cbpm profiles create --persona <name>`):", ...rows].join("\n");
+        },
+      );
+    });
+
+  // ── analyze ──────────────────────────────────────────────────────────────
+  profiles
+    .command("analyze <id>")
+    .description("Launch a one-shot headless run and verify the live fingerprint against the profile")
+    .option("-j, --json", "Output as JSON", false)
+    .action(async (id: string, options: { json?: boolean }) => {
+      await runCommand(
+        async () => ({ success: true, data: await api.analyzeProfile(id) }),
+        options,
+        (r: DetectionReport) => {
+          const lines = [
+            `Detection report for ${r.profile_id}: ${r.passed} passed, ${r.failed} failed, ${r.warnings} warnings`,
+          ];
+          if (r.error) lines.push(`  ERROR: ${r.error}`);
+          for (const c of r.checks || []) {
+            const mark = c.status === "pass" ? "✓" : c.status === "fail" ? "✗" : "!";
+            lines.push(`  ${mark} ${c.test}: actual=${JSON.stringify(c.actual)} expected=${JSON.stringify(c.expected)}${c.detail ? ` — ${c.detail}` : ""}`);
+          }
+          if (r.coherence_warnings?.length) {
+            lines.push("", "Coherence warnings:");
+            for (const w of r.coherence_warnings) lines.push(`  • ${w}`);
+          }
+          return lines.join("\n");
+        },
       );
     });
 

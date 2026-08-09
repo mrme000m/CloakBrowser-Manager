@@ -40,7 +40,7 @@ def test_create_profile_minimal(tmp_db: Path):
     p = db.create_profile("Test")
     assert p["name"] == "Test"
     assert isinstance(p["id"], str) and len(p["id"]) == 36  # UUID
-    assert 10000 <= p["fingerprint_seed"] <= 99999  # random default
+    assert 1 <= p["fingerprint_seed"] <= 2_000_000_000  # full 32-bit random default
     assert p["user_data_dir"].startswith(str(tmp_db))
     assert p["platform"] == "windows"
     assert p["created_at"] is not None

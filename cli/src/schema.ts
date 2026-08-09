@@ -29,9 +29,9 @@ export const PROFILE_FIELDS: FieldSchema[] = [
   { name: "gpu_vendor", flag: "--gpu-vendor", type: "string", required: false, default: "null", description: "Spoofed GPU vendor string.", example: "Apple" },
   { name: "gpu_renderer", flag: "--gpu-renderer", type: "string", required: false, default: "null", description: "Spoofed GPU renderer string.", example: "Apple M2" },
   { name: "hardware_concurrency", flag: "--hardware-concurrency", type: "int", required: false, default: "null", description: "navigator.hardwareConcurrency override.", example: "8" },
-  { name: "device_memory", flag: "--device-memory", type: "int", required: false, default: "null", description: "navigator.deviceMemory in GB (e.g. 8).", example: "8" },
+  { name: "device_memory", flag: "--device-memory", type: "float", required: false, default: "null", description: "navigator.deviceMemory in GB. Real Chrome only reports 0.25/0.5/1/2/4/8 (capped at 8).", example: "8" },
   { name: "brand", flag: "--brand", type: "enum:chrome|edge|opera|vivaldi", required: false, default: "null", description: "Sec-CH-UA browser brand.", example: "chrome" },
-  { name: "brand_version", flag: "--brand-version", type: "string", required: false, default: "null", description: "Sec-CH-UA browser version.", example: "120.0.6099.109" },
+  { name: "brand_version", flag: "--brand-version", type: "string", required: false, default: "null", description: "Sec-CH-UA browser version. Leave unset to derive from the CloakBrowser binary Chromium version (recommended — a mismatch with the UA is a bot tell).", example: "146.0.7680.177.5" },
   { name: "platform_version", flag: "--platform-version", type: "string", required: false, default: "null", description: "Sec-CH-UA-Platform-Version.", example: "10.0.19045" },
   { name: "fonts_dir", flag: "--fonts-dir", type: "string", required: false, default: "null", description: "Directory containing target-platform fonts for font fingerprinting.", example: "/data/fonts/win10" },
   { name: "storage_quota_mb", flag: "--storage-quota", type: "int", required: false, default: "null", description: "Override storage quota reported through Storage APIs (MB).", example: "4096" },
@@ -56,6 +56,8 @@ export const PROFILE_FIELDS: FieldSchema[] = [
   { name: "is_template", flag: "--is-template", type: "bool", required: false, default: "false", description: "Mark as a template (cannot be launched; clone to create runnable profiles).", example: "true" },
   { name: "restart_on_crash", flag: "--restart-on-crash", type: "bool", required: false, default: "false", description: "Auto-restart the browser if it exits unexpectedly.", example: "true" },
   { name: "max_restarts", flag: "--max-restarts", type: "int", required: false, default: "5", description: "Max crash-restart attempts (with --restart-on-crash). Exponential backoff, capped 60s.", example: "3" },
+  { name: "extension_paths", flag: "--extension-path", type: "list[string]", required: false, default: "null", description: "Chrome extension paths to load. Repeatable.", example: "/path/to/ext" },
+  { name: "persona", flag: "--persona", type: "string", required: false, default: "null", description: "Coherent real-world device persona (sets screen/GPU/cores/memory/DPR/platform-version together). Run `cbpm profiles personas` for the list.", example: "win11-rtx3070-desktop" },
   { name: "tags", flag: "--tag", type: "list[string]", required: false, default: "null", description: "Tags. Repeat the flag for multiple values; optional `tag:color` form.", example: "--tag shop --tag us:red" },
 ];
 

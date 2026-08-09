@@ -176,9 +176,9 @@ class ProfileCreate(BaseModel):
     gpu_vendor: str | None = None
     gpu_renderer: str | None = None
     hardware_concurrency: int | None = None
-    device_memory: int | None = None  # GB, must be one of standard Chrome values: 0.25,0.5,1,2,4,8
+    device_memory: float | None = None  # GB; real Chrome only reports 0.25/0.5/1/2/4/8 (capped at 8)
     brand: Literal["chrome", "edge", "opera", "vivaldi"] | None = None  # Sec-CH-UA brand
-    brand_version: str | None = None  # e.g. "120.0.6099.109"
+    brand_version: str | None = None  # leave unset → derived from binary Chromium version
     platform_version: str | None = None  # e.g. "10.0.19045" (Windows) or "13_5_1" (macOS)
     fonts_dir: str | None = None  # directory with target-platform fonts for font fingerprinting
     storage_quota_mb: int | None = None  # overrides storage quota reported via Storage APIs
@@ -207,7 +207,26 @@ class ProfileCreate(BaseModel):
     is_mobile: bool = False
     has_touch: bool = False
     extension_paths: list[str] | None = None  # Chrome extension paths to load
+    persona: str | None = None  # coherent real-world device persona name (applied at creation)
     tags: list[TagCreate] | None = None
+
+    @field_validator("device_memory")
+    @classmethod
+    def validate_device_memory(cls, v: object) -> object:
+        """Reject deviceMemory values real Chrome cannot report.
+
+        navigator.deviceMemory is a privacy-threshold value capped at 8 GB;
+        stock Chrome only ever reports 0.25/0.5/1/2/4/8. Reporting 16/32/64 is
+        impossible and a strong bot signal, so we block it at the write path.
+        """
+        if v is None:
+            return v
+        if v not in (0.25, 0.5, 1, 2, 4, 8):
+            raise ValueError(
+                "device_memory must be one of 0.25, 0.5, 1, 2, 4, 8 "
+                "(navigator.deviceMemory is capped at 8 in real Chrome)"
+            )
+        return v
 
 
 class ProfileUpdate(BaseModel):
@@ -225,7 +244,7 @@ class ProfileUpdate(BaseModel):
     gpu_vendor: str | None = Field(default=None)
     gpu_renderer: str | None = Field(default=None)
     hardware_concurrency: int | None = Field(default=None)
-    device_memory: int | None = Field(default=None)
+    device_memory: float | None = Field(default=None)
     brand: Literal["chrome", "edge", "opera", "vivaldi"] | None = Field(default=None)
     brand_version: str | None = Field(default=None)
     platform_version: str | None = Field(default=None)
@@ -256,7 +275,20 @@ class ProfileUpdate(BaseModel):
     is_mobile: bool | None = None
     has_touch: bool | None = None
     extension_paths: list[str] | None = Field(default=None)
+    persona: str | None = Field(default=None)
     tags: list[TagCreate] | None = None
+
+    @field_validator("device_memory")
+    @classmethod
+    def validate_device_memory(cls, v: object) -> object:
+        if v is None:
+            return v
+        if v not in (0.25, 0.5, 1, 2, 4, 8):
+            raise ValueError(
+                "device_memory must be one of 0.25, 0.5, 1, 2, 4, 8 "
+                "(navigator.deviceMemory is capped at 8 in real Chrome)"
+            )
+        return v
 
 
 class ProfileResponse(BaseModel):
@@ -277,7 +309,7 @@ class ProfileResponse(BaseModel):
     gpu_vendor: str | None = None
     gpu_renderer: str | None = None
     hardware_concurrency: int | None = None
-    device_memory: int | None = None
+    device_memory: float | None = None
     brand: str | None = None
     brand_version: str | None = None
     platform_version: str | None = None
@@ -302,6 +334,7 @@ class ProfileResponse(BaseModel):
     is_mobile: bool = False
     has_touch: bool = False
     extension_paths: list[str] | None = None
+    persona: str | None = None
     coherence_warnings: list[str] = []
 
     @field_validator("clipboard_sync", mode="before")

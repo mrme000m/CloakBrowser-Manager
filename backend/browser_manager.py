@@ -119,6 +119,27 @@ def _validate_proxy(url: str) -> None:
         raise ValueError(f"Proxy URL missing port: {url}")
 
 
+def _proxy_known_country(profile: dict[str, Any]) -> str | None:
+    """Best-effort: return a saved exit country for the profile's proxy.
+
+    Used only to let the coherence engine's timezone/locale ↔ proxy-country
+    cross-checks fire at launch time (before the post-launch GeoIP detection
+    populates the running profile). Returns None when unknown.
+    """
+    cred_id = profile.get("proxy_credential_id")
+    if cred_id:
+        cred = db.get_proxy_credential(cred_id)
+        if cred:
+            return cred.get("last_country")
+    group_id = profile.get("proxy_group_id")
+    if group_id:
+        for mid in db.list_group_member_ids(group_id):
+            cred = db.get_proxy_credential(mid)
+            if cred and cred.get("last_country"):
+                return cred["last_country"]
+    return None
+
+
 def _init_profile_defaults(user_data_dir: Path) -> None:
     """Set up bookmarks and DuckDuckGo search on first launch."""
     default_dir = user_data_dir / "Default"
@@ -339,7 +360,16 @@ class BrowserManager:
                 self._clear_profile_storage(user_data_dir)
 
             # ── Coherence check ──
-            coherence_warnings = coherence.analyze_profile(profile)
+            # Enrich the profile dict with the resolved proxy's known country so
+            # the timezone/locale ↔ proxy-country cross-checks can fire at launch.
+            coherence_profile = dict(profile)
+            if proxy and not coherence_profile.get("proxy_country"):
+                coherence_profile["proxy_country"] = _proxy_known_country(profile)
+            coherence_warnings = coherence.analyze_profile(
+                coherence_profile,
+                host_platform=coherence.detect_host_platform(),
+                actual_angle_backend="swiftshader",
+            )
             if coherence_warnings:
                 for w in coherence_warnings:
                     logger.warning("Coherence issue for %s: %s", profile["name"], w)
@@ -763,10 +793,16 @@ class BrowserManager:
 
     def _build_fingerprint_args(self, profile: dict[str, Any]) -> list[str]:
         """Build extra Chromium args from profile fingerprint settings."""
+        # The VNC container has no physical GPU, so render with software GL.
+        # The spoofed GPU renderer string is set via --fingerprint-gpu-renderer
+        # below; the coherence engine warns that software GL ≠ the spoofed
+        # hardware backend so users know the tradeoff.
+        # NOTE: --disable-infobars (dead since Chrome 76) and --test-type (an
+        # automation/test flag) were removed — both are stale-script tells that
+        # anti-bot guides look for, and the stealth binary suppresses the
+        # bad-flags infobar at the source level.
         args: list[str] = [
-            "--disable-infobars",
-            "--test-type",  # suppress "unsupported flag: --no-sandbox" bad flags warning
-            "--use-angle=swiftshader",  # software GL for VNC (no GPU in container)
+            "--use-angle=swiftshader",
         ]
 
         seed = profile.get("fingerprint_seed")

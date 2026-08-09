@@ -6,8 +6,10 @@ import { CommandError, exitCodeForStatus, hintForStatus } from "./errors.js";
 import type {
   AuthStatus,
   BulkResultResponse,
+  DetectionReport,
   LaunchResult,
   OkResponse,
+  Persona,
   Profile,
   ProfileStatus,
   ProxyCredential,
@@ -111,6 +113,11 @@ export const api = {
   cloneProfile: (id: string, name?: string) =>
     request<Profile>("POST", `/api/profiles/${id}/clone`, name ? { name } : {}),
   profileStatus: (id: string) => request<ProfileStatus>("GET", `/api/profiles/${id}/status`),
+  reseedProfile: (id: string) => request<Profile>("POST", `/api/profiles/${id}/reseed`),
+  rotateIdentity: (id: string) => request<Profile>("POST", `/api/profiles/${id}/rotate-identity`),
+  resetUserAgent: (id: string) => request<Profile>("POST", `/api/profiles/${id}/reset-ua`),
+  analyzeProfile: (id: string) => request<DetectionReport>("POST", `/api/profiles/${id}/analyze`),
+  listPersonas: () => request<Persona[]>("GET", "/api/personas"),
   bulkLaunch: (body: { ids?: string[]; tag?: string }) =>
     request<BulkResultResponse>("POST", "/api/profiles/bulk/launch", body),
   bulkStop: (body: { ids?: string[]; tag?: string }) =>

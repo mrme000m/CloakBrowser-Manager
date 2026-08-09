@@ -79,6 +79,7 @@ def init_db():
                 is_mobile BOOLEAN DEFAULT 0,
                 has_touch BOOLEAN DEFAULT 0,
                 extension_paths TEXT,
+                persona TEXT,
                 user_data_dir TEXT NOT NULL,
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
@@ -189,6 +190,7 @@ def init_db():
             ("is_mobile", "BOOLEAN DEFAULT 0"),
             ("has_touch", "BOOLEAN DEFAULT 0"),
             ("extension_paths", "TEXT"),
+            ("persona", "TEXT"),
         ]
         for col, ddl in _ORGANIC_FIELDS:
             if col not in cols:
@@ -219,7 +221,8 @@ def create_profile(
     **fields: Any,
 ) -> dict[str, Any]:
     profile_id = str(uuid.uuid4())
-    seed = fingerprint_seed if fingerprint_seed is not None else random.randint(10000, 99999)
+    # Full 32-bit seed space for entropy across a fleet (was 5-digit range).
+    seed = fingerprint_seed if fingerprint_seed is not None else random.randint(1, 2_000_000_000)
     user_data_dir = str(DATA_DIR / "profiles" / profile_id)
     now = _now()
     tags = fields.pop("tags", None) or []
@@ -238,8 +241,8 @@ def create_profile(
                 proxy_group_id, proxy_assignment,
                 clear_on_launch, storage_state, permissions,
                 device_scale_factor, is_mobile, has_touch, extension_paths,
-                user_data_dir, created_at, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                persona, user_data_dir, created_at, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 profile_id, name, seed,
                 fields.get("proxy"),
@@ -286,6 +289,7 @@ def create_profile(
                 bool(fields.get("is_mobile", False)),
                 bool(fields.get("has_touch", False)),
                 json.dumps(fields.get("extension_paths")) if fields.get("extension_paths") else None,
+                fields.get("persona"),
                 user_data_dir, now, now,
             ),
         )
@@ -371,6 +375,7 @@ def update_profile(profile_id: str, **fields: Any) -> dict[str, Any] | None:
         "proxy_credential_id", "is_template", "restart_on_crash", "max_restarts",
         "proxy_group_id", "proxy_assignment",
         "clear_on_launch", "device_scale_factor", "is_mobile", "has_touch",
+        "persona",
     ):
         if col in fields:
             update_cols.append(f"{col} = ?")
@@ -815,6 +820,7 @@ _CLONE_FIELDS = (
     "launch_args", "notes", "timezone", "locale",
     "clear_on_launch", "storage_state", "permissions",
     "device_scale_factor", "is_mobile", "has_touch", "extension_paths",
+    "persona",
 )
 
 

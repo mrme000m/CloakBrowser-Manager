@@ -96,9 +96,12 @@ _mgr = BrowserManager()
 
 def test_build_args_always_includes_base():
     args = _mgr._build_fingerprint_args({})
-    assert "--disable-infobars" in args
-    assert "--test-type" in args
+    # The only always-on arg is the software GL backend for the GPU-less VNC
+    # container. Stale automation tells (--disable-infobars / --test-type) were
+    # removed; the spoofed GPU renderer is set via --fingerprint-gpu-renderer.
     assert "--use-angle=swiftshader" in args
+    assert "--disable-infobars" not in args
+    assert "--test-type" not in args
 
 
 def test_build_args_seed():
@@ -138,8 +141,8 @@ def test_build_args_screen():
 
 def test_build_args_empty_profile():
     args = _mgr._build_fingerprint_args({})
-    # Only the 3 base args
-    assert len(args) == 3
+    # Only the 1 base arg (software GL backend)
+    assert len(args) == 1
 
 
 # ── launch_args appended to extra_args ────────────────────────────────────────

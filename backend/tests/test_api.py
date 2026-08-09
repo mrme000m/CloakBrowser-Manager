@@ -55,6 +55,53 @@ def test_create_profile_invalid_platform(app_client: TestClient):
     assert resp.status_code == 422
 
 
+def test_create_profile_with_persona_applies_bundle(app_client: TestClient):
+    # A persona sets a coherent bundle; an explicit override (gpu_renderer)
+    # still wins over the persona's GPU.
+    resp = app_client.post("/api/profiles", json={
+        "name": "Persona",
+        "persona": "win11-rtx3070-desktop",
+        "gpu_renderer": "ANGLE (AMD, RX 7900 Direct3D11, D3D11)",
+    })
+    assert resp.status_code == 201
+    d = resp.json()
+    assert d["persona"] == "win11-rtx3070-desktop"
+    # Persona-derived fields applied (user did not set these).
+    assert d["screen_width"] == 2560
+    assert d["screen_height"] == 1440
+    assert d["hardware_concurrency"] == 16
+    assert d["device_memory"] in (8, 8.0)
+    assert d["platform_version"] == "10.0.22631"
+    # Explicit override honored.
+    assert "RX 7900" in d["gpu_renderer"]
+
+
+def test_create_profile_unknown_persona_400(app_client: TestClient):
+    resp = app_client.post("/api/profiles", json={"name": "Bad", "persona": "nope"})
+    assert resp.status_code == 400
+
+
+def test_list_personas(app_client: TestClient):
+    resp = app_client.get("/api/personas")
+    assert resp.status_code == 200
+    names = [p["name"] for p in resp.json()]
+    assert "win11-rtx3070-desktop" in names
+
+
+def test_rotate_identity_reseeds_and_reapplies_persona(app_client: TestClient):
+    create = app_client.post("/api/profiles", json={
+        "name": "Rot", "persona": "win11-rtx3070-desktop", "fingerprint_seed": 111,
+    })
+    pid = create.json()["id"]
+    resp = app_client.post(f"/api/profiles/{pid}/rotate-identity")
+    assert resp.status_code == 200
+    d = resp.json()
+    assert d["fingerprint_seed"] != 111
+    # Persona hardware bundle re-applied.
+    assert d["hardware_concurrency"] == 16
+    assert d["screen_width"] == 2560
+
+
 def test_get_profile(app_client: TestClient):
     create = app_client.post("/api/profiles", json={"name": "Get Me"})
     pid = create.json()["id"]
@@ -88,7 +135,7 @@ def test_reseed_profile(app_client: TestClient):
     assert resp.status_code == 200
     data = resp.json()
     assert data["fingerprint_seed"] != 12345
-    assert 10000 <= data["fingerprint_seed"] <= 99999
+    assert 1 <= data["fingerprint_seed"] <= 2_000_000_000  # full 32-bit random
 
 
 def test_reseed_profile_not_found(app_client: TestClient):

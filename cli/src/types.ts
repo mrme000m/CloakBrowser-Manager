@@ -100,6 +100,27 @@ export interface Profile {
   is_template: boolean;
   restart_on_crash: boolean;
   max_restarts: number;
+  device_memory: number | null;
+  brand: string | null;
+  brand_version: string | null;
+  platform_version: string | null;
+  fonts_dir: string | null;
+  storage_quota_mb: number | null;
+  taskbar_height: number | null;
+  geolocation_lat: number | null;
+  geolocation_lon: number | null;
+  webrtc_ip: string | null;
+  noise_enabled: boolean;
+  human_config: Record<string, unknown> | null;
+  clear_on_launch: boolean;
+  storage_state: Record<string, unknown> | null;
+  permissions: string[] | null;
+  device_scale_factor: number | null;
+  is_mobile: boolean;
+  has_touch: boolean;
+  extension_paths: string[] | null;
+  persona: string | null;
+  coherence_warnings: string[];
   user_data_dir: string;
   created_at: string;
   updated_at: string;
@@ -179,4 +200,32 @@ export interface ProxyLocation {
   host: string;
   city: string;
   country: string;
+}
+
+/** GET /api/personas → list of coherent device personas. */
+export interface Persona {
+  name: string;
+  label: string;
+  platform: string;
+}
+
+/** One row in an /analyze detection report. */
+export interface DetectionCheck {
+  test: string;
+  status: "pass" | "fail" | "warn";
+  actual: unknown;
+  expected: unknown;
+  detail: string;
+}
+
+/** POST /api/profiles/{id}/analyze → live detection report. */
+export interface DetectionReport {
+  profile_id: string;
+  passed: number;
+  failed: number;
+  warnings: number;
+  checks: DetectionCheck[];
+  coherence_warnings: string[];
+  raw?: Record<string, unknown>;
+  error?: string;
 }

@@ -111,18 +111,24 @@ Each profile can be tuned for **maximum coherence** — every fingerprint signal
 
 ### Quick Start: Create a clean Windows profile
 
+The recommended way to get a coherent, organic fingerprint is to build from a
+**device persona** — a curated, internally-consistent real-world machine (screen,
+GPU, cores, memory, DPR, platform version all set together). Leave
+`brand_version` / `user_agent` unset so they are derived from the CloakBrowser
+binary's Chromium version and never disagree (a UA↔Sec-CH-UA version mismatch is
+a classic bot tell).
+
 ```bash
+# List available personas
+cbpm profiles personas
+
 # CLI
 cbpm profiles create \
   --name "shop-us" \
-  --platform windows \
+  --persona win11-rtx3070-desktop \
   --geoip true \
   --humanize true \
-  --webrtc-ip auto \
-  --device-memory 8 \
-  --brand chrome \
-  --brand-version 120.0.6099.109 \
-  --platform-version 10.0.19045
+  --webrtc-ip auto
 ```
 
 Then launch and visit the bookmarked detection sites to verify.
@@ -131,18 +137,42 @@ Then launch and visit the bookmarked detection sites to verify.
 
 | Field | Purpose | Recommended |
 |---|---|---|
+| `--persona` | Apply a coherent real-world device bundle | Use this instead of setting each field by hand |
 | `--geoip` | Auto-match timezone + locale to proxy IP | Always enable with a proxy |
-| `--webrtc-ip auto` | Spoof WebRTC ICE candidates to proxy IP | Always when using a proxy |
+| `--webrtc-ip auto` | Spoof WebRTC ICE candidates to proxy IP | Always when using a proxy (auto-injected) |
+| `--brand` | Sec-CH-UA browser brand | `chrome` on all platforms |
+| `--brand-version` | Sec-CH-UA version | **Leave unset** → derived from the binary (a mismatch with the UA is a bot tell) |
+| `--user-agent` | Override User-Agent | **Leave unset** → matches the binary's Chromium version |
+| `--platform-version` | Sec-CH-UA-Platform-Version | Set by the persona (Win: `10.0.19045`, Mac: `14_3`) |
 | `--noise-enabled false` | Disable canvas/WebGL noise (stable identity) | For returning-user profiles |
-| `--device-memory 8` | Set `navigator.deviceMemory` | Match platform norms |
-| `--brand chrome` | Sec-CH-UA browser brand | Chrome on all platforms |
-| `--brand-version` | Sec-CH-UA version | Match Chromium binary |
-| `--platform-version` | Sec-CH-UA-Platform-Version | Win: `10.0.19045`, Mac: `13_5_1` |
-| `--fonts-dir` | Custom font directory | Required for Windows-spoofing on Linux |
+| `--device-memory` | `navigator.deviceMemory` | `8`; real Chrome only reports 0.25/0.5/1/2/4/8 (capped at 8) |
+| `--fonts-dir` | Custom font directory | Required when spoofing Windows/macOS on a Linux host |
 | `--clear-on-launch` | Wipe cookies/cache each launch | For fresh-session profiles |
 | `--geolocation-lat/lon` | Consistent geolocation | Match IP location |
 | `--storage-quota` | Override storage quota | Match device class |
-| `--taskbar-height` | Adjust availHeight | Windows: 40, macOS: 23 |
+| `--taskbar-height` | Adjust availHeight | Set by the persona (Win: 40, macOS: 23) |
+| `--device-scale-factor` | Pixel ratio | Set by the persona (macOS Retina: 2.0) |
+
+### Device personas
+
+A persona is a fully-coherent, real-world machine. Creating a fleet from
+*different* personas gives diverse-but-individually-consistent profiles, instead
+of N copies of `1920×1080 + RTX 3070` which anti-bot systems cluster on.
+
+```bash
+cbpm profiles personas
+#   win10-thinkpad-t14      windows  ThinkPad T14 (Intel Iris Xe, 1920×1080@125%)
+#   win11-rtx3070-desktop  windows  Desktop (RTX 3070, 2560×1440)
+#   win10-amd-4k           windows  Desktop (RX 7900, 4K@150%)
+#   mac-mbp-m2-14          macos    MacBook Pro 14" (M2, 1512×982 Retina)
+#   mac-mba-m1             macos    MacBook Air (M1, 1440×900 Retina)
+#   linux-amd-desktop      linux    Desktop (RX 6700, 1920×1080)
+```
+
+`--persona win11-rtx3070-desktop` sets the screen, GPU, cores, memory, DPR,
+platform version, and taskbar together. Any field you also pass explicitly
+overrides the persona for that one field (and the coherence engine will flag the
+resulting mismatch).
 
 ### Platform consistency guide
 
@@ -181,11 +211,31 @@ The coherence engine validates these automatically and surfaces warnings in the 
 ### Automated Analysis API
 
 ```bash
-# Run a one-shot detection test against bot.sannysoft.com
+# Launch a one-shot headless run and verify the live fingerprint against the
+# profile (reads the actual navigator/WebGL/screen/timezone/WebRTC values
+# from the page and compares them to the profile — not a third-party scraper).
 curl -X POST http://localhost:8080/api/profiles/<id>/analyze
 ```
 
-Returns per-test pass/fail results and coherence warnings.
+Returns a per-signal pass/fail/warn report (UA↔Sec-CH-UA version, UA↔binary,
+WebGL renderer↔platform, `deviceMemory ≤ 8`, timezone↔locale, screen chain,
+devicePixelRatio, speechSynthesis voices, platform fonts, WebRTC IP leak) plus
+the coherence warnings.
+
+### Identity rotation
+
+```bash
+# New full-entropy fingerprint seed (new canvas/audio/etc, same hardware).
+curl -X POST http://localhost:8080/api/profiles/<id>/reseed
+
+# Stronger: new seed AND re-apply the persona's coherent hardware bundle.
+curl -X POST http://localhost:8080/api/profiles/<id>/rotate-identity
+
+# Clear an explicit User-Agent so it is regenerated from the binary.
+curl -X POST http://localhost:8080/api/profiles/<id>/reset-ua
+```
+
+Both take effect on the next launch; a running browser is left untouched.
 
 
 

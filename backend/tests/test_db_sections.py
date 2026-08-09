@@ -16,7 +16,7 @@ def test_clone_profile_creates_copy_with_new_seed(tmp_db):
     assert cloned["id"] != src["id"]
     assert cloned["name"] == "Original (copy)"
     assert cloned["fingerprint_seed"] != 42  # new random device identity
-    assert 10000 <= cloned["fingerprint_seed"] <= 99999
+    assert 1 <= cloned["fingerprint_seed"] <= 2_000_000_000  # full 32-bit random
     assert not cloned["is_template"]  # DB stores bools as 0/1
     assert [t["tag"] for t in cloned["tags"]] == ["work"]
 

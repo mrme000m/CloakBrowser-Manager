@@ -91,6 +91,28 @@ def test_profile_create_invalid_color_scheme():
         ProfileCreate(name="Bad", color_scheme="auto")
 
 
+def test_profile_create_rejects_device_memory_over_eight():
+    # Real Chrome caps navigator.deviceMemory at 8; >8 is impossible.
+    for bad in (12, 16, 32, 64):
+        with pytest.raises(ValidationError):
+            ProfileCreate(name="Bad", device_memory=bad)
+
+
+def test_profile_create_accepts_standard_device_memory():
+    for ok in (0.25, 0.5, 1, 2, 4, 8):
+        assert ProfileCreate(name="Ok", device_memory=ok).device_memory == ok
+
+
+def test_profile_update_rejects_device_memory_over_eight():
+    with pytest.raises(ValidationError):
+        ProfileUpdate(device_memory=16)
+
+
+def test_profile_create_persona_field():
+    assert ProfileCreate(name="P", persona="win11-rtx3070-desktop").persona == "win11-rtx3070-desktop"
+    assert ProfileCreate(name="P").persona is None
+
+
 # ── ProfileUpdate ────────────────────────────────────────────────────────────
 
 

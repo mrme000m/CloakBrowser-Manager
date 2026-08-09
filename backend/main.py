@@ -684,7 +684,34 @@ async def list_profiles(request: Request):
 
 @app.post("/api/profiles", response_model=ProfileResponse, status_code=201)
 async def create_profile(req: ProfileCreate, request: Request):
+    # Which fields the user actually provided (vs Pydantic defaults).
+    explicit = req.model_dump(exclude_unset=True)
+    persona_name = explicit.pop("persona", None)
+
     data = req.model_dump()
+    if persona_name is not None:
+        persona = coherence.get_persona(persona_name)
+        if not persona:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Unknown persona '{persona_name}'. "
+                    f"Available: {', '.join(coherence.list_persona_names())}"
+                ),
+            )
+        # Apply the persona's coherent bundle as defaults; any field the user
+        # explicitly set still wins (so a persona + a manual GPU override is
+        # honored, and the coherence engine will flag a resulting mismatch).
+        for key, value in persona["fields"].items():
+            if key not in explicit:
+                data[key] = value
+        # Lock platform to the persona's platform unless explicitly overridden.
+        if "platform" not in explicit:
+            data["platform"] = persona["platform"]
+        data["persona"] = persona_name
+    else:
+        data.pop("persona", None)
+
     tags = data.pop("tags", None)
     if tags:
         data["tags"] = [t.model_dump() if hasattr(t, "model_dump") else t for t in tags]
@@ -870,12 +897,293 @@ async def upload_storage_state(profile_id: str, body: dict, request: Request):
             "origins_count": len(body.get("origins", []))}
 
 
+# ── Detection analysis ────────────────────────────────────────────────────────
+#
+# Instead of scraping one third-party detection page, we read the *actual*
+# runtime values from the launched browser and compare them to the profile's
+# intended values. This turns static coherence warnings into live proof: a
+# mismatch between navigator.userAgentData and the UA, a WebGL renderer that
+# doesn't match the profile, a deviceMemory > 8, a timezone that disagrees with
+# the proxy, or a WebRTC IP leak are all caught from the real page.
+
+# In-page probe: collects every signal an anti-bot script reads. Each section
+# is independently guarded so one failure can't blank the whole report. Returns
+# a plain JSON-serializable object (no browser APIs).
+DETECTION_PROBE_JS = """
+async () => {
+  const out = {};
+  try {
+    out.userAgent = navigator.userAgent;
+    out.platform = navigator.platform;
+    out.hardwareConcurrency = navigator.hardwareConcurrency;
+    out.deviceMemory = navigator.deviceMemory;
+    out.languages = Array.from(navigator.languages || []);
+    out.webdriver = navigator.webdriver;
+    out.timeZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+    out.locale = Intl.DateTimeFormat().resolvedOptions().locale;
+  } catch (e) {}
+  try {
+    if (navigator.userAgentData) {
+      out.uaDataBrands = (navigator.userAgentData.brands || []).map(b => ({brand: b.brand, version: b.version}));
+      out.uaDataPlatform = navigator.userAgentData.platform;
+      out.uaDataPlatformVersion = navigator.userAgentData.platformVersion;
+    }
+  } catch (e) {}
+  try {
+    out.screen = { width: screen.width, height: screen.height, availWidth: screen.availWidth, availHeight: screen.availHeight, colorDepth: screen.colorDepth };
+    out.window = { innerWidth: window.innerWidth, innerHeight: window.innerHeight, outerWidth: window.outerWidth, outerHeight: window.outerHeight, devicePixelRatio: window.devicePixelRatio };
+  } catch (e) {}
+  try {
+    const c = document.createElement('canvas');
+    const gl = c.getContext('webgl') || c.getContext('experimental-webgl');
+    if (gl) {
+      const dbg = gl.getExtension('WEBGL_debug_renderer_info');
+      out.webgl = { vendor: dbg ? gl.getParameter(dbg.UNMASKED_VENDOR_WEBGL) : null, renderer: dbg ? gl.getParameter(dbg.UNMASKED_RENDERER_WEBGL) : null };
+    } else { out.webgl = {}; }
+  } catch (e) { out.webgl = {}; }
+  try {
+    const voices = (typeof speechSynthesis !== 'undefined') ? speechSynthesis.getVoices() : [];
+    out.voices = { count: voices.length, langs: voices.slice(0, 12).map(v => v.lang) };
+  } catch (e) { out.voices = { count: 0, langs: [] }; }
+  try {
+    const test = "mmmmmmmmmmlli";
+    const probe = (family) => {
+      const span = document.createElement('span');
+      span.style.cssText = "font-size:72px;position:absolute;left:-9999px;top:-9999px;";
+      span.textContent = test;
+      document.body.appendChild(span);
+      span.style.fontFamily = "monospace";
+      const base = span.offsetWidth;
+      span.style.fontFamily = `'${family}', monospace`;
+      const w = span.offsetWidth;
+      document.body.removeChild(span);
+      return w !== base;
+    };
+    const candidates = ["Segoe UI","Segoe UI Light","Calibri","Arial Narrow","Helvetica Neue","Menlo","Avenir","Cantarell","Liberation Sans","Ubuntu"];
+    out.fonts = { detected: candidates.filter(probe) };
+  } catch (e) { out.fonts = { detected: [] }; }
+  try {
+    const c = document.createElement('canvas'); const ctx = c.getContext('2d');
+    ctx.textBaseline = 'top'; ctx.font = "14px 'Arial'"; ctx.fillStyle = '#f60'; ctx.fillRect(0,0,200,50);
+    ctx.fillStyle = '#069'; ctx.fillText("CloakBrowser fingerprint", 2, 2);
+    out.canvas = c.toDataURL().slice(-64);
+  } catch (e) {}
+  try {
+    const Ctx = (window.AudioContext || window.webkitAudioContext);
+    if (Ctx) {
+      const ac = new Ctx(); const osc = ac.createOscillator(); const an = ac.createAnalyser();
+      osc.connect(an); osc.start();
+      const data = new Float32Array(an.frequencyBinCount); an.getFloatFrequencyData(data);
+      out.audio = Array.from(data.slice(0, 16)).map(n => n.toFixed(2)).join(',');
+      osc.stop(); ac.close();
+    }
+  } catch (e) {}
+  try {
+    const pc = new RTCPeerConnection({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] });
+    pc.createDataChannel('x');
+    const ips = new Set();
+    const done = new Promise((resolve) => {
+      pc.onicecandidate = (e) => {
+        if (!e.candidate) { resolve(); return; }
+        const m = /([0-9a-fA-F.:]+)\\/(?:udp|tcp)/i.exec(e.candidate.candidate || '');
+        if (m) ips.add(m[1]);
+      };
+      setTimeout(resolve, 2000);
+    });
+    pc.createOffer().then(o => pc.setLocalDescription(o)).catch(() => {});
+    await done;
+    pc.close();
+    out.webrtc = { checked: true, ips: Array.from(ips) };
+  } catch (e) { out.webrtc = { checked: false, ips: [] }; }
+  return out;
+}
+"""
+
+
+def _is_private_ip(ip: str) -> bool:
+    """True for loopback / RFC1918 / link-local / IPv6 site-local addresses."""
+    if not ip:
+        return True
+    if ip in ("127.0.0.1", "::1", "0.0.0.0"):
+        return True
+    if ip.startswith(("127.", "10.", "192.168.", "169.254.", "fe80", "fc", "fd")):
+        return True
+    if ip.startswith("172."):
+        try:
+            second = int(ip.split(".")[1])
+            if 16 <= second <= 31:
+                return True
+        except (ValueError, IndexError):
+            pass
+    return False
+
+
+def evaluate_detection_report(
+    actual: dict[str, Any],
+    expected: dict[str, Any],
+    coherence_warnings: list[str] | None = None,
+) -> dict[str, Any]:
+    """Compare live browser signals (``actual``) to the profile's intended
+    values (``expected``) and return a structured pass/fail report.
+
+    Pure function — fully unit-testable without launching a browser. Each check
+    is one of: ``pass`` (matches), ``fail`` (hard mismatch = detectable), or
+    ``warn`` (soft / best-effort / environment-driven).
+    """
+    checks: list[dict[str, Any]] = []
+
+    def add(test: str, status: str, actual_v: Any, expected_v: Any, detail: str = "") -> None:
+        checks.append(
+            {"test": test, "status": status, "actual": actual_v, "expected": expected_v, "detail": detail}
+        )
+
+    ua = actual.get("userAgent") or ""
+    ua_major = coherence._chrome_major_from_ua(ua)
+    brands = actual.get("uaDataBrands") or []
+    ch_chrome = next(
+        (b.get("version") for b in brands if "Chrome" in (b.get("brand") or "")), None
+    )
+    ch_major = coherence._major_from_version(ch_chrome)
+    bin_major = coherence._major_from_version(coherence.get_binary_chromium_version())
+
+    # 1. Internal: UA Chrome major vs Sec-CH-UA Chrome brand version.
+    if ua_major and ch_major:
+        if ua_major == ch_major:
+            add("UA ↔ Sec-CH-UA version", "pass", ch_major, ua_major)
+        else:
+            add(
+                "UA ↔ Sec-CH-UA version", "fail", ch_major, ua_major,
+                "Sec-CH-UA Chrome version must equal the UA Chrome major; a mismatch is a classic bot tell.",
+            )
+
+    # 2. UA vs the CloakBrowser binary Chromium version.
+    if ua_major and bin_major and bin_major >= 80:
+        if ua_major == bin_major:
+            add("UA ↔ CloakBrowser binary", "pass", ua_major, bin_major)
+        else:
+            add(
+                "UA ↔ CloakBrowser binary", "fail", ua_major, bin_major,
+                "Leave user_agent unset so it matches the binary's Chromium version.",
+            )
+
+    # 3/4. WebGL renderer vs expected + platform-consistency.
+    gl = actual.get("webgl") or {}
+    renderer = gl.get("renderer")
+    exp_renderer = expected.get("gpu_renderer")
+    if renderer and exp_renderer:
+        add(
+            "WebGL renderer", "pass" if renderer == exp_renderer else "fail",
+            renderer, exp_renderer,
+        )
+    if renderer:
+        w = coherence.validate_gpu_renderer(expected.get("platform"), renderer)
+        add("WebGL renderer matches platform", "pass" if not w else "fail", renderer, expected.get("platform"), w[0] if w else "")
+
+    # 5/6. Hardware.
+    hc = actual.get("hardwareConcurrency")
+    exp_hc = expected.get("hardware_concurrency")
+    if exp_hc is not None and hc is not None:
+        add("hardwareConcurrency", "pass" if hc == exp_hc else "fail", hc, exp_hc)
+    dm = actual.get("deviceMemory")
+    exp_dm = expected.get("device_memory")
+    if dm is not None and dm > 8:
+        add("deviceMemory cap", "fail", dm, "≤8", "Real Chrome never reports deviceMemory > 8.")
+    elif exp_dm is not None and dm is not None:
+        add("deviceMemory", "pass" if float(dm) == float(exp_dm) else "fail", dm, exp_dm)
+
+    # 7/8. Timezone + locale.
+    tz = actual.get("timeZone")
+    exp_tz = expected.get("timezone")
+    if exp_tz and tz:
+        add("timezone", "pass" if tz == exp_tz else "fail", tz, exp_tz)
+    langs = actual.get("languages") or []
+    exp_loc = expected.get("locale")
+    if exp_loc and langs:
+        add("locale (languages[0])", "pass" if langs[0] == exp_loc else "fail", langs[0], exp_loc)
+
+    # 9/10. Screen + DPR.
+    scr = actual.get("screen") or {}
+    exp_sw = expected.get("screen_width")
+    exp_sh = expected.get("screen_height")
+    if exp_sw and scr.get("width"):
+        add("screen.width", "pass" if scr["width"] == exp_sw else "fail", scr["width"], exp_sw)
+    if exp_sh and scr.get("height"):
+        add("screen.height", "pass" if scr["height"] == exp_sh else "fail", scr["height"], exp_sh)
+    dpr = actual.get("devicePixelRatio") or (actual.get("window") or {}).get("devicePixelRatio")
+    exp_dpr = expected.get("device_scale_factor")
+    if exp_dpr is not None and dpr is not None:
+        add("devicePixelRatio", "pass" if abs(float(dpr) - float(exp_dpr)) < 0.01 else "fail", dpr, exp_dpr)
+
+    # 11/12. Screen chain.
+    if scr.get("height") and scr.get("availHeight"):
+        tb = expected.get("taskbar_height")
+        if tb is not None:
+            exp_avail = scr["height"] - tb
+            add("screen.availHeight (screen − taskbar)", "pass" if scr["availHeight"] == exp_avail else "fail", scr["availHeight"], exp_avail)
+    win = actual.get("window") or {}
+    if win.get("outerHeight") and win.get("innerHeight"):
+        diff = win["outerHeight"] - win["innerHeight"]
+        exp_ui = coherence.chrome_ui_height(expected.get("platform"))
+        if abs(diff - exp_ui) <= 6:
+            add("outerHeight − innerHeight (chrome UI)", "pass", diff, exp_ui)
+        else:
+            add("outerHeight − innerHeight (chrome UI)", "warn", diff, exp_ui, "Should approximate the platform chrome UI height.")
+
+    # 13. speechSynthesis voices platform tell.
+    voices = actual.get("voices") or {}
+    vlangs = " ".join(voices.get("langs") or []).lower()
+    p = (expected.get("platform") or "").lower()
+    if vlangs:
+        if p == "windows":
+            ok = "microsoft" in vlangs or "windows" in vlangs
+        elif p == "macos":
+            ok = "mac" in vlangs or "samantha" in vlangs or "alex" in vlangs or "karen" in vlangs
+        else:
+            ok = True
+        add("speechSynthesis voices", "pass" if ok else "warn", voices.get("count"), p, "Voice set should match the spoofed platform; missing → set --fonts-dir / host font pack.")
+
+    # 14. Platform-tell font.
+    detected = set((actual.get("fonts") or {}).get("detected") or [])
+    need = {"windows": "Segoe UI", "macos": "Helvetica Neue", "linux": "Liberation Sans"}.get(p)
+    if need:
+        present = need in detected
+        add(f"platform font '{need}'", "pass" if present else "warn", "present" if present else "missing", "present", "Set --fonts-dir to a real platform font pack.")
+
+    # 15. WebRTC IP leak.
+    webrtc = actual.get("webrtc") or {}
+    if webrtc.get("checked"):
+        ips = webrtc.get("ips") or []
+        exit_ip = expected.get("exit_ip")
+        public = [ip for ip in ips if not _is_private_ip(ip)]
+        if exit_ip and public:
+            leaked = [ip for ip in public if ip != exit_ip]
+            add("WebRTC IP leak", "fail" if leaked else "pass", ips, f"only {exit_ip}", "Real host IP must not appear in ICE candidates.")
+        else:
+            add("WebRTC IP leak", "warn", ips, "proxy IP only", "Could not verify against the proxy exit IP.")
+
+    passed = sum(1 for c in checks if c["status"] == "pass")
+    failed = sum(1 for c in checks if c["status"] == "fail")
+    warns = sum(1 for c in checks if c["status"] == "warn")
+    return {
+        "passed": passed,
+        "failed": failed,
+        "warnings": warns,
+        "checks": checks,
+        "coherence_warnings": list(coherence_warnings or []),
+    }
+
+
 @app.post("/api/profiles/{profile_id}/analyze")
 async def analyze_detection(profile_id: str, request: Request):
-    """Run a one-shot detection test by navigating a headless browser
-    to a bot-detection page and extracting the result.
+    """Run a one-shot live detection test against a headless launch of the
+    profile. Reads the actual runtime fingerprint signals from the page and
+    compares them to the profile's intended values, returning a per-signal
+    pass/fail/warn report plus coherence warnings.
 
-    Returns a detection report with pass/fail and raw text.
+    This is a *live* check (not a third-party scraper): it proves the spoofed
+    values the binary actually emits match the profile, so a UA/Sec-CH-UA drift,
+    a WebGL renderer mismatch, a deviceMemory > 8, a timezone/IP disagreement,
+    or a WebRTC leak is caught from the real page.
     """
     import asyncio as _asyncio
     profile_raw = db.get_profile(profile_id)
@@ -884,10 +1192,9 @@ async def analyze_detection(profile_id: str, request: Request):
     if profile_raw.get("is_template"):
         raise HTTPException(status_code=409, detail="Templates cannot be analyzed")
 
-    # Build a minimal profile dict for a one-shot headless launch
+    # One-shot headless launch into a throwaway user-data dir.
     test_profile: dict[str, Any] = dict(profile_raw)
     test_profile["headless"] = True
-    # Use a temp dir to avoid polluting the real profile
     import tempfile
     tmp_dir = tempfile.mkdtemp(prefix=f"cb-analyze-{profile_id[:8]}-")
     test_profile["user_data_dir"] = tmp_dir
@@ -905,40 +1212,27 @@ async def analyze_detection(profile_id: str, request: Request):
     try:
         page = running.context.pages[0] if running.context.pages else await running.context.new_page()
 
-        # Navigate to a bot-detection page
-        await page.goto("https://bot.sannysoft.com/", timeout=30, wait_until="networkidle")
-        await _asyncio.sleep(3)  # let JS evaluation complete
+        # about:blank keeps the probe self-contained (no third-party dependency,
+        # no rate-limiting); all navigator/screen/WebGL APIs work there.
+        await page.goto("about:blank", timeout=15000)
+        await _asyncio.sleep(0.5)  # let userAgentData / voices warm up
 
-        result_text = await page.evaluate("""() => {
-            const els = document.querySelectorAll('table tr');
-            const rows = [];
-            els.forEach((el) => {
-                const cells = el.querySelectorAll('td, th');
-                if (cells.length >= 2) {
-                    rows.push({test: cells[0].textContent.trim(), result: cells[1].textContent.trim()});
-                }
-            });
-            return JSON.stringify(rows);
-        }""")
+        actual = await page.evaluate(DETECTION_PROBE_JS)
 
-        import json as _json
-        rows = _json.loads(result_text) if isinstance(result_text, str) else []
-
-        failed = [r for r in rows if "false" in (r.get("result", "")).lower() or "missing" in (r.get("result", "")).lower()]
-        passed = [r for r in rows if r not in failed]
-
-        return {
-            "profile_id": profile_id,
-            "passed": len(passed),
-            "failed": len(failed),
-            "details": rows,
-            "coherence_warnings": running.coherence_warnings,
-        }
+        expected: dict[str, Any] = dict(profile_raw)
+        expected["exit_ip"] = running.exit_ip
+        report = evaluate_detection_report(actual, expected, running.coherence_warnings)
+        report["profile_id"] = profile_id
+        report["raw"] = actual
+        return report
     except Exception as exc:
         return {
             "profile_id": profile_id,
             "error": str(exc),
-            "details": [],
+            "passed": 0,
+            "failed": 0,
+            "warnings": 0,
+            "checks": [],
             "coherence_warnings": running.coherence_warnings,
         }
     finally:
@@ -958,10 +1252,36 @@ async def reseed_profile(profile_id: str, request: Request):
     if not profile:
         raise HTTPException(status_code=404, detail="Profile not found")
     old_seed = profile.get("fingerprint_seed")
-    new_seed = random.randint(10000, 99999)
+    new_seed = random.randint(1, 2_000_000_000)
     while new_seed == old_seed:
-        new_seed = random.randint(10000, 99999)
+        new_seed = random.randint(1, 2_000_000_000)
     updated = db.update_profile(profile_id, fingerprint_seed=new_seed)
+    if not updated:
+        raise HTTPException(status_code=404, detail="Profile not found")
+    return _enrich_profile(updated, request.scope)
+
+
+@app.post("/api/profiles/{profile_id}/rotate-identity", response_model=ProfileResponse)
+async def rotate_identity(profile_id: str, request: Request):
+    """Generate a fresh, coherent device identity for a profile.
+
+    A stronger alternative to ``/reseed``: it draws a new full-entropy seed AND,
+    when the profile has a persona, re-applies that persona's coherent hardware
+    bundle (screen, GPU, cores, memory, platform version, DPR) so the rotated
+    identity is internally consistent rather than a new seed bolted onto stale
+    manual overrides. Takes effect on the next launch.
+    """
+    profile = db.get_profile(profile_id)
+    if not profile:
+        raise HTTPException(status_code=404, detail="Profile not found")
+    new_seed = random.randint(1, 2_000_000_000)
+    updates: dict[str, Any] = {"fingerprint_seed": new_seed}
+    persona = coherence.get_persona(profile.get("persona"))
+    if persona:
+        for key, value in persona["fields"].items():
+            updates[key] = value
+        updates["platform"] = persona["platform"]
+    updated = db.update_profile(profile_id, **updates)
     if not updated:
         raise HTTPException(status_code=404, detail="Profile not found")
     return _enrich_profile(updated, request.scope)
@@ -1024,6 +1344,12 @@ async def get_system_status():
 
 
 _TEST_FIELDS = ("ok", "exit_ip", "country", "timezone", "latency_ms", "error")
+
+
+@app.get("/api/personas")
+async def list_personas():
+    """List the coherent device personas usable with --persona / --persona on create."""
+    return coherence.list_personas()
 
 
 @app.get("/api/proxy-credentials", response_model=list[ProxyCredentialResponse])
