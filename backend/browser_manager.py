@@ -797,11 +797,24 @@ class BrowserManager:
         # The spoofed GPU renderer string is set via --fingerprint-gpu-renderer
         # below; the coherence engine warns that software GL ≠ the spoofed
         # hardware backend so users know the tradeoff.
-        # NOTE: --disable-infobars (dead since Chrome 76) and --test-type (an
-        # automation/test flag) were removed — both are stale-script tells that
-        # anti-bot guides look for, and the stealth binary suppresses the
-        # bad-flags infobar at the source level.
+        # NOTE on Chrome infobar / automation flags:
+        # - --disable-infobars: dead since Chrome 76, removed — it does nothing.
+        # - --test-type: re-added. Chromium's bad-flags prompt ("You are using an
+        #   unsupported command-line flag: --no-sandbox. Stability and security
+        #   will suffer.") fires whenever --no-sandbox is passed, which is always
+        #   here — the browser runs as root in an unprivileged container where the
+        #   sandbox can't initialize (the setuid sandbox needs a non-root user and
+        #   the user-namespace sandbox is blocked by this host's AppArmor policy).
+        #   The prior note claimed the stealth binary suppressed that prompt at the
+        #   source level; that is not true for binary 146.0.7680.177.5 — the string
+        #   is still in locales/en-US.pak and the banner renders in the VNC.
+        #   --test-type suppresses it cleanly and adds no web-detectable tell: a
+        #   CDP probe vs. a baseline stealth launch reports identical
+        #   navigator.webdriver (=false), no cdc_*/domAutomation* globals, and the
+        #   same UA — the only "tell" is the local CLI switch, which remote sites
+        #   cannot read. Do NOT remove it without also removing --no-sandbox.
         args: list[str] = [
+            "--test-type",
             "--use-angle=swiftshader",
         ]
 
