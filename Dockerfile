@@ -25,10 +25,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Playwright system deps (matches test-infra)
 RUN pip install --no-cache-dir playwright && playwright install-deps chromium 2>/dev/null || true && pip uninstall -y playwright
 
-# Windows core fonts (Arial, Times New Roman, Verdana, etc.)
+# Windows core fonts (Arial, Times New Roman, Verdana, etc.) + Noto color
+# emoji. The emoji font is required so canvas emoji-glyph hashes match real
+# Windows Chrome — Kasada/Akamai probe exactly this to spot Linux hosts.
 RUN echo "deb http://deb.debian.org/debian trixie contrib" >> /etc/apt/sources.list.d/contrib.list \
     && echo "ttf-mscorefonts-installer msttcorefonts/accepted-mscorefonts-eula select true" | debconf-set-selections \
-    && apt-get update && apt-get install -y --no-install-recommends ttf-mscorefonts-installer \
+    && apt-get update && apt-get install -y --no-install-recommends ttf-mscorefonts-installer fonts-noto-color-emoji \
     && fc-cache -f \
     && rm -rf /var/lib/apt/lists/*
 

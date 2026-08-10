@@ -694,6 +694,19 @@ class BrowserManager:
                     ".then(r=>r.json()).then(d=>d.ip).catch(()=>null)"
                 )
                 running.exit_ip = ip
+                # Warn if a user pinned --fingerprint-webrtc-ip to an address
+                # that isn't the proxy exit IP — that leaks a second public IP
+                # in WebRTC ICE candidates. "auto" (auto-injected when a proxy
+                # is set) follows the exit IP and is fine.
+                try:
+                    wip = ((db.get_profile(profile_id) or {}).get("webrtc_ip") or "").strip()
+                    if wip and wip.lower() != "auto" and ip and wip != ip:
+                        running.coherence_warnings.append(
+                            f"webrtc_ip='{wip}' does not match the proxy exit IP "
+                            f"'{ip}'; WebRTC ICE candidates will leak a second public IP."
+                        )
+                except Exception as exc:
+                    logger.debug("webrtc_ip coherence failed for %s: %s", profile_id, exc)
             except Exception as exc:
                 logger.debug("geoip exit ip failed for %s: %s", profile_id, exc)
             try:
@@ -825,6 +838,14 @@ class BrowserManager:
         p = profile.get("platform")
         if p:
             args.append(f"--fingerprint-platform={p}")
+            # Align font metrics to Windows so metric-based font detection
+            # (Kasada/Akamai) can't tell the Linux host's font rendering from a
+            # real Windows install, even without the Segoe UI glyph. The SDK
+            # merges MediaRouter into --enable-features when this is present;
+            # Playwright also lists MediaRouter in --disable-features, but
+            # --enable-features takes precedence, so it ends up enabled.
+            if p.lower() == "windows":
+                args.append("--fingerprint-windows-font-metrics")
 
         vendor = profile.get("gpu_vendor")
         if vendor:

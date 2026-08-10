@@ -96,12 +96,12 @@ _mgr = BrowserManager()
 
 def test_build_args_always_includes_base():
     args = _mgr._build_fingerprint_args({})
-    # The only always-on arg is the software GL backend for the GPU-less VNC
-    # container. Stale automation tells (--disable-infobars / --test-type) were
-    # removed; the spoofed GPU renderer is set via --fingerprint-gpu-renderer.
+    # The always-on args are --test-type (suppresses the --no-sandbox bad-flags
+    # banner — see _build_fingerprint_args) and the software GL backend for the
+    # GPU-less VNC container. --disable-infobars stays off (dead since Chrome 76).
+    assert "--test-type" in args
     assert "--use-angle=swiftshader" in args
     assert "--disable-infobars" not in args
-    assert "--test-type" not in args
 
 
 def test_build_args_seed():
@@ -117,6 +117,19 @@ def test_build_args_no_seed():
 def test_build_args_platform():
     args = _mgr._build_fingerprint_args({"platform": "macos"})
     assert "--fingerprint-platform=macos" in args
+
+
+def test_build_args_windows_includes_font_metrics():
+    # Windows profiles (the default on the Linux host) align font metrics to
+    # Windows so metric-based font detection can't spot the Linux host.
+    args = _mgr._build_fingerprint_args({"platform": "windows"})
+    assert "--fingerprint-platform=windows" in args
+    assert "--fingerprint-windows-font-metrics" in args
+
+
+def test_build_args_macos_omits_font_metrics():
+    args = _mgr._build_fingerprint_args({"platform": "macos"})
+    assert "--fingerprint-windows-font-metrics" not in args
 
 
 def test_build_args_gpu():
@@ -141,8 +154,8 @@ def test_build_args_screen():
 
 def test_build_args_empty_profile():
     args = _mgr._build_fingerprint_args({})
-    # Only the 1 base arg (software GL backend)
-    assert len(args) == 1
+    # The 2 base args: --test-type (bad-flags banner suppression) + software GL.
+    assert len(args) == 2
 
 
 # ── launch_args appended to extra_args ────────────────────────────────────────

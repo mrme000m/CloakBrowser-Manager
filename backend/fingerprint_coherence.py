@@ -264,6 +264,20 @@ def validate_hardware_concurrency(
             f"hardwareConcurrency={concurrency} is outside the typical 1-64 range."
         )
 
+    # Odd logical-core counts (3, 5, 7, 13, …) are not real SKUs — even
+    # big.LITTLE hybrids report even totals. COMMON_CORE_COUNTS is the
+    # recognized even consumer set; an odd value is a detectable outlier.
+    if (
+        concurrency is not None
+        and concurrency > 2
+        and concurrency % 2 == 1
+        and concurrency not in COMMON_CORE_COUNTS
+    ):
+        warnings.append(
+            f"hardwareConcurrency={concurrency} is odd; real CPUs report even "
+            "logical-core counts (see COMMON_CORE_COUNTS)."
+        )
+
     if device_memory is not None and device_memory not in STANDARD_DEVICE_MEMORY:
         warnings.append(
             f"deviceMemory={device_memory} GB is not a value real Chrome reports "
@@ -767,6 +781,29 @@ def suggest_persona(seed: int | None = None) -> dict[str, Any]:
     return rng.choice(PERSONAS)
 
 
+def validate_launch_args(launch_args: list[str] | None) -> list[str]:
+    """Warn on ``launch_args`` that re-introduce automation / test-harness tells.
+
+    The SDK suppresses these via ``IGNORE_DEFAULT_ARGS`` and source patches; a
+    user passing them through ``launch_args`` would undo that and leak
+    ``navigator.webdriver`` or a distinctive software-renderer string.
+    """
+    warnings: list[str] = []
+    tell_leaking = (
+        "--enable-automation",                       # sets navigator.webdriver = true
+        "--enable-unsafe-swiftshader",                # distinctive SwiftShader renderer string
+        "--disable-blink-features=AutomationControlled",  # puppeteer-stealth tell
+    )
+    for arg in launch_args or []:
+        a = (arg or "").strip()
+        if a in tell_leaking or a.startswith("--disable-blink-features=AutomationControlled"):
+            warnings.append(
+                f"launch_args contains '{a.split('=', 1)[0]}', which re-introduces "
+                "an automation/test-harness tell the SDK suppresses by default."
+            )
+    return warnings
+
+
 def analyze_profile(
     profile: dict[str, Any],
     *,
@@ -849,6 +886,8 @@ def analyze_profile(
             screen_h,
         )
     )
+
+    warnings.extend(validate_launch_args(profile.get("launch_args")))
 
     if host_platform:
         warnings.extend(

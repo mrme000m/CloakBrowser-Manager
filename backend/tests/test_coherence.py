@@ -22,6 +22,7 @@ from ..fingerprint_coherence import (
     validate_ua_brand_coherence,
     validate_user_agent,
     validate_client_hints,
+    validate_launch_args,
     chrome_ui_height,
     suggest_viewport_height,
     suggest_gpu_for_platform,
@@ -102,6 +103,21 @@ class TestHardwareConcurrency:
             assert validate_hardware_concurrency(None, 8, ok) == [] or all(
                 "real Chrome" not in x for x in validate_hardware_concurrency(None, 8, ok)
             )
+
+    def test_odd_core_count_warns(self):
+        # Odd logical-core counts (7, 13, …) are not real SKUs.
+        for odd in (3, 5, 7, 13):
+            w = validate_hardware_concurrency("windows", odd, 8)
+            assert any("odd" in x for x in w), f"concurrency={odd} should warn as odd"
+
+    def test_odd_core_count_single_skips(self):
+        # 1 is a plausible VM core count — must not trigger the odd warning.
+        w = validate_hardware_concurrency("windows", 1, 8)
+        assert all("odd" not in x for x in w)
+
+    def test_even_core_count_no_odd_warning(self):
+        w = validate_hardware_concurrency("windows", 8, 8)
+        assert all("odd" not in x for x in w)
 
 
 class TestScreenViewport:
@@ -418,3 +434,37 @@ class TestBinaryVersion:
     def test_returns_test_sentinel(self):
         # conftest mocks cloakbrowser.config.CHROMIUM_VERSION = "0.0.0-test"
         assert get_binary_chromium_version() == "0.0.0-test"
+
+
+# ── launch_args tell-leak (M4) ─────────────────────────────────────────────────
+
+
+class TestLaunchArgsTellLeak:
+    def test_enable_automation_warns(self):
+        w = validate_launch_args(["--enable-automation"])
+        assert len(w) == 1 and "automation" in w[0]
+
+    def test_enable_unsafe_swiftshader_warns(self):
+        w = validate_launch_args(["--enable-unsafe-swiftshader"])
+        assert len(w) == 1 and "automation" in w[0]
+
+    def test_automation_controlled_blink_feature_warns(self):
+        w = validate_launch_args(["--disable-blink-features=AutomationControlled"])
+        assert len(w) == 1
+        # The comma-suffix variant (multi-feature) must also be caught.
+        assert len(validate_launch_args(["--disable-blink-features=AutomationControlled,Foo"])) == 1
+
+    def test_clean_args_no_warn(self):
+        assert validate_launch_args(["--load-extension=/x", "--foo=bar"]) == []
+
+    def test_none_no_warn(self):
+        assert validate_launch_args(None) == []
+
+    def test_analyze_profile_flags_tell_leak(self):
+        # The tell-leak check runs inside analyze_profile too.
+        w = analyze_profile({"launch_args": ["--enable-automation"]})
+        assert any("automation" in x for x in w)
+
+    def test_analyze_profile_clean_launch_args(self):
+        w = analyze_profile({"launch_args": ["--foo=bar"]})
+        assert all("automation" not in x for x in w)

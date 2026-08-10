@@ -123,6 +123,149 @@ def test_coherence_warnings_propagated():
     assert r["coherence_warnings"] == ["x", "y"]
 
 
+# ── Automation / identity tells (H1/H2/H6/H7) ──────────────────────────────────
+
+
+def test_webdriver_truthy_fails():
+    actual = {"userAgent": _ua(146), "webdriver": True}
+    r = evaluate_detection_report(actual, {"platform": "windows"})
+    wd = next(c for c in r["checks"] if c["test"] == "navigator.webdriver")
+    assert wd["status"] == "fail" and wd["actual"] is True
+
+
+def test_webdriver_false_passes():
+    actual = {"userAgent": _ua(146), "webdriver": False}
+    r = evaluate_detection_report(actual, {"platform": "windows"})
+    wd = next(c for c in r["checks"] if c["test"] == "navigator.webdriver")
+    assert wd["status"] == "pass"
+
+
+def test_navigator_platform_match_passes():
+    actual = {"userAgent": _ua(146), "platform": "Win32"}
+    r = evaluate_detection_report(actual, {"platform": "windows"})
+    np = next(c for c in r["checks"] if c["test"] == "navigator.platform")
+    assert np["status"] == "pass" and np["expected"] == "Win32"
+
+
+def test_navigator_platform_mismatch_fails():
+    actual = {"userAgent": _ua(146), "platform": "Linux x86_64"}
+    r = evaluate_detection_report(actual, {"platform": "windows"})
+    np = next(c for c in r["checks"] if c["test"] == "navigator.platform")
+    assert np["status"] == "fail"
+
+
+def test_ua_data_platform_match_passes():
+    actual = {"userAgent": _ua(146), "uaDataPlatform": "Windows"}
+    r = evaluate_detection_report(actual, {"platform": "windows"})
+    ch = next(c for c in r["checks"] if c["test"] == "Sec-CH-UA-Platform")
+    assert ch["status"] == "pass" and ch["expected"] == "Windows"
+
+
+def test_ua_data_platform_mismatch_fails():
+    actual = {"userAgent": _ua(146), "uaDataPlatform": "Linux"}
+    r = evaluate_detection_report(actual, {"platform": "windows"})
+    ch = next(c for c in r["checks"] if c["test"] == "Sec-CH-UA-Platform")
+    assert ch["status"] == "fail"
+
+
+def test_ua_data_platform_absent_warns():
+    actual = {"userAgent": _ua(146)}  # no uaDataPlatform key
+    r = evaluate_detection_report(actual, {"platform": "windows"})
+    ch = next(c for c in r["checks"] if c["test"] == "Sec-CH-UA-Platform")
+    assert ch["status"] == "warn"
+
+
+def test_webgl_vendor_match_passes():
+    actual = {"userAgent": _ua(146), "webgl": {"vendor": "Google Inc. (NVIDIA)", "renderer": "x"}}
+    r = evaluate_detection_report(actual, {"gpu_vendor": "Google Inc. (NVIDIA)"})
+    v = next(c for c in r["checks"] if c["test"] == "WebGL vendor")
+    assert v["status"] == "pass"
+
+
+def test_webgl_vendor_mismatch_fails():
+    actual = {"userAgent": _ua(146), "webgl": {"vendor": "Google Inc.", "renderer": "x"}}
+    r = evaluate_detection_report(actual, {"gpu_vendor": "Google Inc. (NVIDIA)"})
+    v = next(c for c in r["checks"] if c["test"] == "WebGL vendor")
+    assert v["status"] == "fail"
+
+
+def test_plugins_five_passes():
+    actual = {"userAgent": _ua(146), "automation": {"plugins": 5}}
+    r = evaluate_detection_report(actual, {})
+    p = next(c for c in r["checks"] if c["test"] == "navigator.plugins")
+    assert p["status"] == "pass"
+
+
+def test_plugins_not_five_warns():
+    actual = {"userAgent": _ua(146), "automation": {"plugins": 0}}
+    r = evaluate_detection_report(actual, {})
+    p = next(c for c in r["checks"] if c["test"] == "navigator.plugins")
+    assert p["status"] == "warn"
+
+
+def test_window_chrome_absent_fails():
+    actual = {"userAgent": _ua(146), "automation": {"hasChrome": False, "chromeRuntime": False}}
+    r = evaluate_detection_report(actual, {})
+    c = next(c for c in r["checks"] if c["test"] == "window.chrome")
+    assert c["status"] == "fail"
+
+
+def test_chrome_runtime_present_warns():
+    actual = {"userAgent": _ua(146), "automation": {"hasChrome": True, "chromeRuntime": True}}
+    r = evaluate_detection_report(actual, {})
+    c = next(c for c in r["checks"] if c["test"] == "chrome.runtime")
+    assert c["status"] == "warn"
+
+
+def test_window_chrome_present_no_runtime_passes():
+    actual = {"userAgent": _ua(146), "automation": {"hasChrome": True, "chromeRuntime": False}}
+    r = evaluate_detection_report(actual, {})
+    c = next(c for c in r["checks"] if c["test"] == "window.chrome")
+    assert c["status"] == "pass"
+
+
+def test_max_touch_points_desktop_passes():
+    actual = {"userAgent": _ua(146), "automation": {"maxTouchPoints": 0}}
+    r = evaluate_detection_report(actual, {"has_touch": False})
+    m = next(c for c in r["checks"] if c["test"] == "navigator.maxTouchPoints")
+    assert m["status"] == "pass"
+
+
+def test_max_touch_points_touch_mismatch_warns():
+    actual = {"userAgent": _ua(146), "automation": {"maxTouchPoints": 0}}
+    r = evaluate_detection_report(actual, {"has_touch": True})
+    m = next(c for c in r["checks"] if c["test"] == "navigator.maxTouchPoints")
+    assert m["status"] == "warn"
+
+
+def test_notification_permission_default_passes():
+    actual = {"userAgent": _ua(146), "automation": {"notificationPermission": "default"}}
+    r = evaluate_detection_report(actual, {})
+    n = next(c for c in r["checks"] if c["test"] == "Notification.permission")
+    assert n["status"] == "pass"
+
+
+def test_notification_permission_granted_warns():
+    actual = {"userAgent": _ua(146), "automation": {"notificationPermission": "granted"}}
+    r = evaluate_detection_report(actual, {})
+    n = next(c for c in r["checks"] if c["test"] == "Notification.permission")
+    assert n["status"] == "warn"
+
+
+def test_color_depth_non_standard_warns():
+    actual = {"userAgent": _ua(146), "screen": {"colorDepth": 16, "width": 1920, "height": 1080}}
+    r = evaluate_detection_report(actual, {})
+    cd = next(c for c in r["checks"] if c["test"] == "screen.colorDepth")
+    assert cd["status"] == "warn"
+
+
+def test_color_depth_24_passes():
+    actual = {"userAgent": _ua(146), "screen": {"colorDepth": 24, "width": 1920, "height": 1080}}
+    r = evaluate_detection_report(actual, {})
+    cd = next(c for c in r["checks"] if c["test"] == "screen.colorDepth")
+    assert cd["status"] == "pass"
+
+
 def test_is_private_ip():
     assert _is_private_ip("127.0.0.1")
     assert _is_private_ip("192.168.1.1")

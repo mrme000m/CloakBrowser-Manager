@@ -929,6 +929,27 @@ async () => {
       out.uaDataPlatformVersion = navigator.userAgentData.platformVersion;
     }
   } catch (e) {}
+  // Automation / environment surfaces anti-bot scripts read alongside the
+  // spoofed identity. Each is independent so one missing API can't blank it.
+  try {
+    out.automation = {
+      plugins: (navigator.plugins ? navigator.plugins.length : 0),
+      mimeTypes: (navigator.mimeTypes ? navigator.mimeTypes.length : 0),
+      hasChrome: (typeof window.chrome !== 'undefined'),
+      chromeRuntime: !!(window.chrome && window.chrome.runtime),
+      pdfViewerEnabled: (typeof navigator.pdfViewerEnabled === 'boolean') ? navigator.pdfViewerEnabled : null,
+      notificationPermission: (typeof Notification !== 'undefined') ? Notification.permission : null,
+      maxTouchPoints: (typeof navigator.maxTouchPoints === 'number') ? navigator.maxTouchPoints : 0,
+    };
+    if (navigator.connection) {
+      out.automation.connection = {
+        effectiveType: navigator.connection.effectiveType,
+        downlink: navigator.connection.downlink,
+        rtt: navigator.connection.rtt,
+        saveData: navigator.connection.saveData,
+      };
+    }
+  } catch (e) {}
   try {
     out.screen = { width: screen.width, height: screen.height, availWidth: screen.availWidth, availHeight: screen.availHeight, colorDepth: screen.colorDepth };
     out.window = { innerWidth: window.innerWidth, innerHeight: window.innerHeight, outerWidth: window.outerWidth, outerHeight: window.outerHeight, devicePixelRatio: window.devicePixelRatio };
@@ -1066,6 +1087,61 @@ def evaluate_detection_report(
                 "Leave user_agent unset so it matches the binary's Chromium version.",
             )
 
+    # Automation / identity tells — the most basic bot signals. webdriver is
+    # the single most-checked automation flag; navigator.platform and the
+    # high-entropy Sec-CH-UA-Platform must agree with the spoofed OS.
+    wd = actual.get("webdriver")
+    if wd is not None:
+        add(
+            "navigator.webdriver", "pass" if not wd else "fail", wd, False,
+            "navigator.webdriver must be false; any truthy value is an instant automation tell.",
+        )
+
+    _NAV_PLATFORM = {"windows": "Win32", "macos": "MacIntel", "linux": "Linux x86_64"}
+    exp_nav_platform = _NAV_PLATFORM.get((expected.get("platform") or "").lower())
+    nav_platform = actual.get("platform")
+    if exp_nav_platform and nav_platform:
+        add(
+            "navigator.platform", "pass" if nav_platform == exp_nav_platform else "fail",
+            nav_platform, exp_nav_platform,
+            "navigator.platform must match the spoofed OS (Win32 / MacIntel / Linux x86_64).",
+        )
+
+    _CH_PLATFORM = {"windows": "Windows", "macos": "macOS", "linux": "Linux"}
+    exp_ch_platform = _CH_PLATFORM.get((expected.get("platform") or "").lower())
+    ch_platform = actual.get("uaDataPlatform")
+    if exp_ch_platform:
+        if ch_platform is None:
+            add(
+                "Sec-CH-UA-Platform", "warn", ch_platform, exp_ch_platform,
+                "userAgentData.platform not exposed — the binary may not warm up on about:blank; re-check on a real page.",
+            )
+        elif ch_platform != exp_ch_platform:
+            add(
+                "Sec-CH-UA-Platform", "fail", ch_platform, exp_ch_platform,
+                "Sec-CH-UA-Platform (high-entropy) must equal the spoofed OS.",
+            )
+        else:
+            add("Sec-CH-UA-Platform", "pass", ch_platform, exp_ch_platform)
+
+    # userAgentData.platformVersion uses a separate Windows version family
+    # (e.g. "15.0.0" for Win11) vs --fingerprint-platform-version ("10.0.19045"),
+    # so only warn on a clear Win10/Win11 family split, never hard-fail.
+    pv = actual.get("uaDataPlatformVersion")
+    exp_pv = expected.get("platform_version")
+    if pv and exp_pv and (expected.get("platform") or "").lower() == "windows":
+
+        def _win_major(s: Any) -> str | None:
+            s = (s or "").strip()
+            return s.split(".")[0] if s and s[:1].isdigit() else None
+
+        a_maj, e_maj = _win_major(pv), _win_major(exp_pv)
+        if a_maj and e_maj and (a_maj == "10") != (e_maj == "10"):
+            add(
+                "Sec-CH-UA-Platform-Version family", "warn", pv, exp_pv,
+                "userAgentData.platformVersion Windows family (Win10 vs Win11) differs from platform_version.",
+            )
+
     # 3/4. WebGL renderer vs expected + platform-consistency.
     gl = actual.get("webgl") or {}
     renderer = gl.get("renderer")
@@ -1078,6 +1154,10 @@ def evaluate_detection_report(
     if renderer:
         w = coherence.validate_gpu_renderer(expected.get("platform"), renderer)
         add("WebGL renderer matches platform", "pass" if not w else "fail", renderer, expected.get("platform"), w[0] if w else "")
+    vendor = gl.get("vendor")
+    exp_vendor = expected.get("gpu_vendor")
+    if vendor and exp_vendor:
+        add("WebGL vendor", "pass" if vendor == exp_vendor else "fail", vendor, exp_vendor)
 
     # 5/6. Hardware.
     hc = actual.get("hardwareConcurrency")
@@ -1147,7 +1227,58 @@ def evaluate_detection_report(
     need = {"windows": "Segoe UI", "macos": "Helvetica Neue", "linux": "Liberation Sans"}.get(p)
     if need:
         present = need in detected
-        add(f"platform font '{need}'", "pass" if present else "warn", "present" if present else "missing", "present", "Set --fonts-dir to a real platform font pack.")
+        detail = "Set --fonts-dir to a real platform font pack."
+        if p == "windows" and not present:
+            detail += " --fingerprint-windows-font-metrics (auto-applied for Windows profiles) aligns font metrics without the Segoe UI glyph, defusing metric-based font detection."
+        add(f"platform font '{need}'", "pass" if present else "warn", "present" if present else "missing", "present", detail)
+
+    # 14b. Automation surfaces — plugins, window.chrome, touch, notifications,
+    # colorDepth. Classic bot-detection signals read alongside the identity.
+    au = actual.get("automation") or {}
+    plugins_len = au.get("plugins")
+    if plugins_len is not None:
+        # Headed Chrome reports 5 plugin entries; stock headless reports 0. The
+        # probe runs headless, so 0 is expected here — flag only an unexpected
+        # non-zero value (the patched binary should spoof 5 even headless).
+        if plugins_len == 5:
+            add("navigator.plugins", "pass", plugins_len, 5)
+        else:
+            add(
+                "navigator.plugins", "warn", plugins_len, 5,
+                "Headed Chrome reports 5 plugin entries; stock headless reports 0. The patched binary should spoof 5 — verify a headed VNC launch.",
+            )
+
+    has_chrome = au.get("hasChrome")
+    chrome_runtime = au.get("chromeRuntime")
+    if has_chrome is not None:
+        if not has_chrome:
+            add("window.chrome", "fail", False, True, "Real Chrome exposes window.chrome; its absence is a headless/automation tell.")
+        elif chrome_runtime:
+            add("chrome.runtime", "warn", True, False, "chrome.runtime is usually absent on a real headed Chrome; Puppeteer/automation expose it.")
+        else:
+            add("window.chrome", "pass", "present", "present")
+
+    mtp = au.get("maxTouchPoints")
+    if mtp is not None:
+        exp_touch = bool(expected.get("has_touch"))
+        if exp_touch and not mtp:
+            add("navigator.maxTouchPoints", "warn", mtp, ">0", "Profile claims touch but maxTouchPoints is 0.")
+        elif not exp_touch and mtp:
+            add("navigator.maxTouchPoints", "warn", mtp, 0, "Desktop profile but maxTouchPoints > 0.")
+        else:
+            add("navigator.maxTouchPoints", "pass", mtp, ">0" if exp_touch else 0)
+
+    nperm = au.get("notificationPermission")
+    if nperm is not None:
+        add(
+            "Notification.permission", "pass" if nperm == "default" else "warn",
+            nperm, "default",
+            "A fresh profile should report 'default'; 'granted'/'denied' is unusual for a new identity.",
+        )
+
+    if scr.get("colorDepth") is not None:
+        cd = scr["colorDepth"]
+        add("screen.colorDepth", "pass" if cd in (24, 30) else "warn", cd, "24 or 30", "Real panels report 24-bit (or 30-bit HDR); unusual depths are a tell.")
 
     # 15. WebRTC IP leak.
     webrtc = actual.get("webrtc") or {}
