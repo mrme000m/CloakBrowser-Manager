@@ -258,6 +258,100 @@ def _discover_chrome_pid(cdp_port: int) -> int | None:
     return None
 
 
+def _storage_state_origin_seeds(origins: list[Any]) -> dict[str, list[dict[str, str]]]:
+    """Extract a ``{origin: [{name, value}]}`` mapping from a storage_state origins array.
+
+    Pure helper — malformed origins/items are skipped defensively so a bad state
+    never aborts the launch. Used by ``_apply_storage_state`` to seed localStorage
+    via a route-fulfilled page (see ``_seed_local_storage``).
+    """
+    seeds: dict[str, list[dict[str, str]]] = {}
+    for o in origins or []:
+        if not isinstance(o, dict):
+            continue
+        origin = o.get("origin")
+        ls = o.get("localStorage")
+        if not isinstance(origin, str) or not isinstance(ls, list):
+            continue
+        items = [
+            {"name": str(i.get("name", "")), "value": str(i.get("value", ""))}
+            for i in ls
+            if isinstance(i, dict) and i.get("name") is not None
+        ]
+        if items:
+            seeds[origin] = items
+    return seeds
+
+
+async def _seed_local_storage(context: Any, seeds: dict[str, list[dict[str, str]]]) -> None:
+    """Seed localStorage for each origin by navigating a route-fulfilled page.
+
+    Opening a page, fulfilling every request with a blank HTML document, then
+    navigating to each origin lets ``localStorage.setItem`` run inside a real
+    document scoped to that origin. Playwright persists that to the profile's
+    on-disk storage, so a later ``connect_over_cdp`` / fresh-session read sees
+    the values — an ``add_init_script`` would only fire for in-process
+    navigations driven from this context and miss cross-session reads. A
+    per-origin failure logs a warning but does not abort the remaining origins.
+    """
+    page = await context.new_page()
+
+    async def _fulfill(route: Any) -> None:
+        await route.fulfill(
+            status=200,
+            content_type="text/html",
+            body="<!DOCTYPE html><html></html>",
+        )
+
+    try:
+        await page.route("**/*", _fulfill)
+        setter = (
+            "(items)=>{for(const i of items)"
+            "{localStorage.setItem(String(i.name),String(i.value));}}"
+        )
+        for origin, items in seeds.items():
+            try:
+                await page.goto(origin, wait_until="domcontentloaded", timeout=15000)
+                await page.evaluate(setter, items)
+            except Exception as exc:  # per-origin failure: keep seeding the rest
+                logger.warning("localStorage seed failed for %s: %s", origin, exc)
+    finally:
+        try:
+            await page.unroute("**/*")
+        except Exception:  # noqa: BLE001 — best-effort cleanup
+            pass
+        try:
+            await page.close()
+        except Exception:  # noqa: BLE001 — best-effort cleanup
+            pass
+
+
+async def _apply_storage_state(context: Any, storage_state: Any) -> list[str]:
+    """Apply a Playwright storage_state dict to a freshly launched context.
+
+    Cookies are added via ``context.add_cookies`` (browser-level, persists across
+    sessions). localStorage origins are seeded via a route-fulfilled page (see
+    ``_seed_local_storage``) so they survive a ``connect_over_cdp`` / fresh-session
+    read. Best-effort: a malformed state logs a warning and returns it rather
+    than failing the launch. Returns the warnings (empty on success).
+    """
+    warnings: list[str] = []
+    if not isinstance(storage_state, dict):
+        return warnings
+    try:
+        cookies = storage_state.get("cookies") or []
+        if isinstance(cookies, list) and cookies:
+            await context.add_cookies(cookies)
+        seeds = _storage_state_origin_seeds(storage_state.get("origins") or [])
+        if seeds:
+            await _seed_local_storage(context, seeds)
+    except Exception as exc:  # noqa: BLE001 — never fail a launch over bad state
+        msg = f"storage_state could not be applied: {exc}"
+        warnings.append(msg)
+        logger.warning("storage_state apply failed: %s", exc)
+    return warnings
+
+
 @dataclass
 class RunningProfile:
     profile_id: str
@@ -438,6 +532,14 @@ class BrowserManager:
                     await p.evaluate(_clipboard_init_js)
                 except Exception as exc:
                     logger.debug("Clipboard init failed on existing page: %s", exc)
+
+            # Apply pre-seeded storage_state (cookies + localStorage) if stored.
+            # clear_on_launch already wiped the profile dir above, so this restores
+            # a warm session after a clean (or pre-seeds a fresh profile). Best-effort:
+            # a malformed state becomes a coherence warning, never a failed launch.
+            stored_state = profile.get("storage_state")
+            if stored_state:
+                coherence_warnings.extend(await _apply_storage_state(context, stored_state))
 
             running = RunningProfile(
                 profile_id=profile_id,

@@ -4,6 +4,8 @@
  * without docs: `cbpm profiles create --list-fields` / `cbpm profiles create --describe <field>`.
  */
 
+import { existsSync, readFileSync } from "node:fs";
+
 export interface FieldSchema {
   name: string; // backend field name (snake_case)
   flag: string; // CLI flag (kebab-case, --prefix)
@@ -42,11 +44,13 @@ export const PROFILE_FIELDS: FieldSchema[] = [
   { name: "noise_enabled", flag: "--noise-enabled", type: "bool", required: false, default: "true", description: "Enable canvas/WebGL/audio/client-rect noise (disable for stable returning-user identity).", example: "false" },
   { name: "humanize", flag: "--humanize", type: "bool", required: false, default: "false", description: "Enable human-like mouse/keyboard motion.", example: "true" },
   { name: "human_preset", flag: "--human-preset", type: "enum:default|careful", required: false, default: "default", description: "Humanization preset (only with --humanize).", example: "careful" },
+  { name: "human_config", flag: "--human-config", type: "string", required: false, default: "null", description: "Custom humanization overrides as JSON (typing_delay, mouse_wobble_max, etc.). Unknown keys are silently ignored by the SDK.", example: '{"typing_delay":120,"mistype_chance":0.05}' },
   { name: "headless", flag: "--headless", type: "bool", required: false, default: "false", description: "Run without a visible window (no VNC view).", example: "true" },
   { name: "geoip", flag: "--geoip", type: "bool", required: false, default: "false", description: "Match timezone/locale to the proxy exit IP.", example: "true" },
   { name: "clipboard_sync", flag: "--clipboard-sync", type: "bool", required: false, default: "true", description: "Sync clipboard between host and VNC.", example: "false" },
   { name: "auto_launch", flag: "--auto-launch", type: "bool", required: false, default: "false", description: "Launch on manager startup.", example: "true" },
   { name: "clear_on_launch", flag: "--clear-on-launch", type: "bool", required: false, default: "false", description: "Wipe cookies/cache/storage before every launch.", example: "true" },
+  { name: "storage_state", flag: "--storage-state", type: "string", required: false, default: "null", description: "JSON file path (or inline JSON) of a Playwright storage_state to pre-seed cookies/localStorage. Applied on next launch.", example: "/data/state.json" },
   { name: "device_scale_factor", flag: "--device-scale-factor", type: "float", required: false, default: "null", description: "Device pixel ratio override.", example: "2.0" },
   { name: "is_mobile", flag: "--is-mobile", type: "bool", required: false, default: "false", description: "Emulate a mobile device.", example: "true" },
   { name: "has_touch", flag: "--has-touch", type: "bool", required: false, default: "false", description: "Emulate touch screen support.", example: "true" },
@@ -96,4 +100,46 @@ function levenshtein(a: string, b: string): number {
     }
   }
   return dp[m];
+}
+
+/**
+ * Parse a dict-typed CLI field (storage_state / human_config).
+ *
+ * Resolves either a path to an existing JSON file (read + parse) or an inline
+ * JSON string, and requires a plain object (the backend fields are dicts — a
+ * raw string would be HTTP 422). Mirrors bdg's parseJsonObject so cbpm and bdg
+ * behave identically for these two fields.
+ *
+ * @returns `{ ok: true, value }` or `{ ok: false, error }`.
+ */
+export function parseJsonObject(
+  value: string,
+  field: string
+): { ok: true; value: Record<string, unknown> } | { ok: false; error: string } {
+  if (value === "") return { ok: false, error: `--${field.replace(/_/g, "-")} is empty.` };
+  let raw = value;
+  try {
+    if (existsSync(value)) raw = readFileSync(value, "utf-8");
+  } catch {
+    // fall through to inline parsing
+  }
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    return {
+      ok: false,
+      error: `--${field.replace(/_/g, "-")} is not valid JSON${raw === value ? "" : ` (file: ${value})`}: ${msg}`,
+    };
+  }
+  if (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)) {
+    return {
+      ok: false,
+      error: `--${field.replace(/_/g, "-")} must be a JSON object (got ${
+        parsed === null ? "null" : Array.isArray(parsed) ? "array" : typeof parsed
+      }).`,
+    };
+  }
+  return { ok: true, value: parsed as Record<string, unknown> };
 }

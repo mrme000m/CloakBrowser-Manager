@@ -6,6 +6,7 @@ import { Command, Option } from "commander";
 
 import { api, tag } from "../client.js";
 import { effectiveConfig } from "../config.js";
+import { EXIT_CODES } from "../constants.js";
 import { CommandError } from "../errors.js";
 import {
   formatBulk,
@@ -17,7 +18,7 @@ import {
   truncate,
 } from "../format.js";
 import { runCommand, parseIds } from "../runner.js";
-import { PROFILE_FIELDS, listFields, findField, suggestFields } from "../schema.js";
+import { PROFILE_FIELDS, listFields, findField, suggestFields, parseJsonObject } from "../schema.js";
 import type { DetectionReport, Persona, Profile } from "../types.js";
 
 function camel(s: string): string {
@@ -53,8 +54,14 @@ function applyProfileOptions(cmd: Command): void {
   }
 }
 
-/** Build the create/update body from the parsed options (only includes provided fields). */
-function bodyFromOptions(opts: Record<string, unknown>): Record<string, unknown> {
+/** Build the create/update body from the parsed options (only includes provided fields).
+ *
+ * Dict-typed fields (storage_state / human_config) are parsed via parseJsonObject
+ * (file-or-inline) instead of forwarded as raw strings — the backend fields are
+ * dicts, so a raw string would be HTTP 422. On a parse failure a CommandError is
+ * raised (caught by runCommand → exit 80 / INVALID_ARGUMENTS).
+ */
+export function bodyFromOptions(opts: Record<string, unknown>): Record<string, unknown> {
   const body: Record<string, unknown> = {};
   for (const f of PROFILE_FIELDS) {
     const key = camel(f.name);
@@ -71,6 +78,14 @@ function bodyFromOptions(opts: Record<string, unknown>): Record<string, unknown>
     if (f.name === "clipboard_sync") {
       // --no-clipboard-sync → false; otherwise omit (server default true)
       if (val === false) body.clipboard_sync = false;
+      continue;
+    }
+    if (f.name === "storage_state" || f.name === "human_config") {
+      const parsed = parseJsonObject(val as string, f.name);
+      if (!parsed.ok) {
+        throw new CommandError(parsed.error, {}, EXIT_CODES.INVALID_ARGS);
+      }
+      body[f.name] = parsed.value;
       continue;
     }
     if (f.type === "list[string]") {

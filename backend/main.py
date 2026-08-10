@@ -879,8 +879,12 @@ async def clone_profile(profile_id: str, body: CloneRequest, request: Request):
 async def upload_storage_state(profile_id: str, body: dict, request: Request):
     """Upload a Playwright storage_state dict (cookies, localStorage, origins).
 
-    Stored on the profile as JSON; applied on the next launch when
-    clear_on_launch is enabled (clear first, then restore this state).
+    Stored on the profile as JSON; applied on the next launch: cookies via
+    ``context.add_cookies`` (browser-level, persists across sessions) and
+    localStorage via a route-fulfilled no-network page navigation that writes
+    to the profile's on-disk storage (survives a ``connect_over_cdp`` / fresh
+    session read). ``clear_on_launch`` wipes the profile first if enabled
+    (clear, then restore), so a warm session survives a clean launch.
     """
     profile = db.get_profile(profile_id)
     if not profile:

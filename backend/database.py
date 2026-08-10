@@ -381,13 +381,14 @@ def update_profile(profile_id: str, **fields: Any) -> dict[str, Any] | None:
             update_cols.append(f"{col} = ?")
             update_vals.append(fields[col])
 
-    # JSON-serialized columns
+    # JSON-serialized columns. A key that is present but None clears the column
+    # (so PUT {storage_state: null} actually clears it); an absent key is a no-op.
     _json_cols = ("human_config", "storage_state", "permissions", "extension_paths")
     for jc in _json_cols:
-        raw = fields.pop(jc, None)
-        if raw is not None:
+        if jc in fields:
+            raw = fields.pop(jc)
             update_cols.append(f"{jc} = ?")
-            update_vals.append(json.dumps(raw))
+            update_vals.append(None if raw is None else json.dumps(raw))
 
     if update_cols:
         update_cols.append("updated_at = ?")

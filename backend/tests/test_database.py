@@ -140,6 +140,41 @@ def test_list_profiles_includes_launch_args(tmp_db: Path):
     assert args_by_name["B"] == []
 
 
+# ── update_profile: JSON columns (storage_state / human_config) ───────────────
+
+
+def test_update_profile_storage_state_sets_dict(tmp_db: Path):
+    p = db.create_profile("S")
+    updated = db.update_profile(
+        p["id"], storage_state={"cookies": [{"name": "s", "value": "v"}], "origins": []}
+    )
+    assert updated["storage_state"] == {"cookies": [{"name": "s", "value": "v"}], "origins": []}
+
+
+def test_update_profile_storage_state_none_clears(tmp_db: Path):
+    p = db.create_profile("S", storage_state={"cookies": [{"name": "s", "value": "v"}]})
+    assert p["storage_state"] == {"cookies": [{"name": "s", "value": "v"}]}
+    # PUT {storage_state: null} must actually clear the column (not be silently
+    # dropped as a no-op), otherwise `bdg cloak storage-state --clear` is a lie.
+    updated = db.update_profile(p["id"], storage_state=None)
+    assert updated["storage_state"] is None
+
+
+def test_update_profile_storage_state_absent_is_noop(tmp_db: Path):
+    p = db.create_profile("S", storage_state={"cookies": [{"name": "s", "value": "v"}]})
+    # An update that doesn't mention storage_state leaves it untouched.
+    updated = db.update_profile(p["id"], notes="changed")
+    assert updated["storage_state"] == {"cookies": [{"name": "s", "value": "v"}]}
+    assert updated["notes"] == "changed"
+
+
+def test_update_profile_human_config_none_clears(tmp_db: Path):
+    p = db.create_profile("H", human_config={"typing_delay": 120})
+    assert p["human_config"] == {"typing_delay": 120}
+    updated = db.update_profile(p["id"], human_config=None)
+    assert updated["human_config"] is None
+
+
 # ── get_profile ──────────────────────────────────────────────────────────────
 
 
